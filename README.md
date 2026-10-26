@@ -45,6 +45,25 @@ other platforms are not supported yet.
 > Troubleshooting: if the "Add workspace" button disappears, the bundle was installed without its
 > committed `lib/` artifacts. Reinstall with the commands above and restart.
 
+## Tool caveats in combined workspaces
+
+A combined workspace root is a real directory of symlinks, not a Git repository, so a few built-in
+tools need different usage. The plugin injects this as a short per-session context for combined
+workspaces, so the model sees the guidance automatically:
+
+- **Git worktrees (`create_worktree`)** — fails at the combined root (`not a git repository`).
+  Identify the member first (`git -C <member> rev-parse --show-toplevel`) and create its worktree
+  explicitly (`git -C <member> worktree add … -b …`), or use `working_directory({ cd: "<member>" })`
+  to enter that repository and then run the built-in workflow (the session leaves the combined
+  workspace).
+- **grep / glob** — ripgrep traversal does not follow symlinks, so member folders are silently
+  skipped; search with `bash` + `rg --follow` when results must span members.
+- **`workspace-write` sandbox** — writes resolving outside the session workspace root are denied,
+  and every member folder resolves outside it; writing into members needs `danger-full-access`
+  (or a per-call escalation). Read-only work is unaffected.
+
+`read` / `edit` / `write` / `bash` follow the symlinks and work on the real member folders.
+
 ## Details
 
 - Workspaces live under `~/.dsh/multi-workspaces/<slug>`; each contains a hidden
