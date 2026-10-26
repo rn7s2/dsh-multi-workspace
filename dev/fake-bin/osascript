@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Test double for macOS `osascript`, used by the isolated dev instance so the
+# native folder panel can be driven end-to-end without clicking the OS dialog.
+#
+# If the script being run is the plugin's NSOpenPanel script, print the JSON
+# selection stored in $DSH_MULTI_WORKSPACE_TEST_PICK_FILE (an empty file means
+# "operator cancelled"). Every other osascript call goes to the real binary.
+set -euo pipefail
+
+for arg in "$@"; do
+  case "$arg" in
+    *NSOpenPanel*)
+      cat "${DSH_MULTI_WORKSPACE_TEST_PICK_FILE:?DSH_MULTI_WORKSPACE_TEST_PICK_FILE must point at the fake selection file}"
+      exit 0
+      ;;
+  esac
+done
+
+exec /usr/bin/osascript "$@"
