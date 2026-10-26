@@ -17,6 +17,7 @@ import { SelectionError } from './core.js'
 import { materializeWorkspace, removeWorkspaceDirectory } from './fs.js'
 import type { MaterializedWorkspace } from './fs.js'
 import { pickNativeDirectories } from './native-picker.js'
+import { registerCombinedWorkspaceGuidance, type SystemPromptLike } from './prompt.js'
 import {
   NAMESPACE,
   createRequestSchema,
@@ -34,6 +35,13 @@ export interface MultiWorkspaceConfig {
 interface HostContext {
   provide(name: string, value: object): () => void
   get(name: string): unknown
+  /** Cordis dependency-aware registration (used for the runtime context hook). */
+  inject(dependencies: string[], callback: (scope: unknown) => void): void
+}
+
+/** The WorkingDirectory service surface the context provider reads. */
+interface WorkingDirectoryLike {
+  get(session: unknown): string
 }
 
 /** The durable Workspace entity surface this plugin relies on. */
@@ -197,4 +205,29 @@ export function apply(context: unknown, config?: MultiWorkspaceConfig): void {
   const rootDir = resolveWorkspaceRoot(config?.rootDir)
   const service = createMultiWorkspaceService(ctx, rootDir)
   ctx.provide(NAMESPACE, service)
+
+  // Tell the model how the built-in worktree, search, and sandbox behavior
+  // differs inside a combined workspace. The provider only contributes text for
+  // sessions whose effective directory is inside rootDir.
+  registerCombinedWorkspaceGuidance(
+    {
+      inject: (dependencies, callback) =>
+        ctx.inject(dependencies, scope => {
+          callback(scope as { systemPrompt: SystemPromptLike })
+        }),
+    },
+    {
+      rootDir,
+      resolveCwd: session => {
+        if (session === undefined) return undefined
+        const workingDirectory = ctx.get('workingDirectory') as WorkingDirectoryLike | undefined
+        const effective =
+          workingDirectory !== undefined && typeof workingDirectory.get === 'function'
+            ? workingDirectory.get(session)
+            : undefined
+        const header = (session as { header?: { cwd?: string } }).header
+        return typeof effective === 'string' && effective !== '' ? effective : header?.cwd
+      },
+    },
+  )
 }
