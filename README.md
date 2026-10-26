@@ -48,18 +48,33 @@ registration in the DSH UI keeps both the source folders and the combined direct
 The plugin is a bundle: one package that carries a Host half (Typert Remote methods and the
 workspace materializer) and a Client half (occupants of the two directory-flow slots).
 
+The built artifacts (`lib/`) are committed, so a profile can install the package straight from
+this repository — no build step on the installing machine:
+
 ```bash
-git clone <this-repo> dsh-multi-workspace
+# Option A (recommended): install straight from the repository.
+dsh plugin --profile <profile> add github:rn7s2/dsh-multi-workspace
+
+# Option B: from a local checkout (development; rebuild after source changes).
+git clone https://github.com/rn7s2/dsh-multi-workspace.git
 cd dsh-multi-workspace
 pnpm install
 pnpm build
+dsh plugin --profile <profile> add "$PWD"
 
-# Install into a profile (installs the package and selects its bundle):
-dsh plugin --profile web add "$PWD"
-
-# Restart the harness, e.g.
+# Restart the harness once so the Host rows load, e.g.
 dsh web
 ```
+
+Use the profile you actually run: `web` for `dsh web`, `desktop` for the desktop app. Restart the
+application after installing (the bundle's Host rows are imported at boot).
+
+> **Troubleshooting — the "Add workspace" button disappears:** the button is rendered by
+> `ui-workspace` only while a directory-flow occupant is registered, so it disappears if the
+> plugin's Client half fails to load. The common cause is an install without the committed
+> `lib/` artifacts (an older tarball, or a checkout where `lib/` was deleted). Reinstall with the
+> commands above and restart; verify the package directory contains `lib/index.js`,
+> `lib/typert.host.js`, and `lib/client.js`.
 
 Both workspace entry points now open the plugin's picker:
 
@@ -124,6 +139,9 @@ pnpm run typecheck   # tsc --noEmit
 pnpm run test        # vitest unit/integration tests
 pnpm run build       # esbuild artifacts into lib/
 ```
+
+`lib/` is committed on purpose (GitHub installs cannot run a build), so run `pnpm run build` and
+commit the regenerated `lib/` together with every source change.
 
 An isolated end-to-end instance (separate `DSH_HOME`, profile `mwdev`, port 3081) can be started
 with:

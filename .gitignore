@@ -1,5 +1,7 @@
 node_modules/
-lib/
+# lib/ is intentionally committed: profiles install this package from a GitHub
+# tarball, which cannot rebuild the bundle. Run `pnpm build` and commit lib/ with
+# every source change.
 dist/
 *.tsbuildinfo
 .vitest/
