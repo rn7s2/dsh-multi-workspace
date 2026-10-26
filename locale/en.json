@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Multi-Workspace",
+    "description": "Create one workspace from several folders: the plugin symlinks every picked folder into a real directory under ~/.dsh/multi-workspaces and names the workspace \"A, B and C\"."
+  }
+}

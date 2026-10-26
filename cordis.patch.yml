@@ -1,0 +1,25 @@
+# The dsh-multi-workspace bundle patch.
+#
+# The shipped directory picker is single-directory. This bundle replaces the
+# picking *interaction* behind both workspace entry points with the plugin's own
+# native macOS multi-folder panel (the `multiWorkspace/pick` Typert Remote
+# method), while the shipped single-directory adapter/dialog chain stays out of
+# the composition.
+
+# 1. Drop the shipped adaptive chooser row (`@deepseek-ai/dsh-host-directory-picker-auto`),
+#    which would otherwise mount the single-directory surface into the same
+#    directory-flow holes.
+- id: directory-picker
+  disabled: true
+
+- insert:
+    # 2. Keep the directory-picker seam itself available (unchanged single-pick
+    #    behavior for any other consumer) with the host-only native backend.
+    - id: multi-workspace-directory-native
+      name: '@deepseek-ai/dsh-host-directory-picker-native'
+
+    # 3. The plugin itself: host half (native multi-folder panel, real directory
+    #    + symlinks + Workspace registration over Typert Remote) and client half
+    #    (renderless occupants of both directory-flow slots).
+    - id: multi-workspace
+      name: 'dsh-multi-workspace'

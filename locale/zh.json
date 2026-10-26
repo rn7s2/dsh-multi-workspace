@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "多工作区",
+    "description": "一次选择多个文件夹创建组合工作区：插件在 ~/.dsh/multi-workspaces 下创建真实目录并把所选文件夹软链接进去，默认命名为「A, B and C」。"
+  }
+}
