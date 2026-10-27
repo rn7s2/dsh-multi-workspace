@@ -51,16 +51,21 @@ A combined workspace root is a real directory of symlinks, not a Git repository,
 tools need different usage. The plugin injects this as a short per-session context for combined
 workspaces, so the model sees the guidance automatically:
 
-- **Git worktrees (`create_worktree`)** — fails at the combined root (`not a git repository`).
-  Identify the member first (`git -C <member> rev-parse --show-toplevel`) and create its worktree
-  explicitly (`git -C <member> worktree add … -b …`), or use `working_directory({ cd: "<member>" })`
-  to enter that repository and then run the built-in workflow (the session leaves the combined
-  workspace).
-- **grep / glob** — ripgrep traversal does not follow symlinks, so member folders are silently
-  skipped; search with `bash` + `rg --follow` when results must span members.
-- **`workspace-write` sandbox** — writes resolving outside the session workspace root are denied,
-  and every member folder resolves outside it; writing into members needs `danger-full-access`
-  (or a per-call escalation). Read-only work is unaffected.
+- **Git worktrees (`create_worktree`)** — fails at the combined root (`not a git repository`). A
+  worktree must live in the member repository's built-in pool `<member>/.agents/worktrees/<name>`:
+  either `working_directory({ cd: "<member>" })` into that repository first and use
+  `create_worktree` (the session leaves the combined workspace), or create it manually with
+  `git -C <member> worktree add <member>/.agents/worktrees/<name> -b <branch>` plus a pool-local
+  `.gitignore` containing `*` when the pool is new. Never use sibling layouts such as
+  `<repo>-<task>` or `<repo>_worktrees/<name>`.
+- **grep / glob** — a search started at the combined root does not follow the member symlinks;
+  point them at a member path explicitly, or use `bash` + `rg --follow` for a root-wide search.
+- **`workspace-write` sandbox** — the sandbox root stays the session's original directory (the
+  combined workspace), so member folders are not writable. When a needed write is denied, the
+  model mentions once that Full access is required and suggests switching the session access mode;
+  this is **advisory only** — it must not block the task, and under workspace-write/read-only it
+  continues with permitted work and reports which writes were skipped. A per-call escalation stays
+  available for one exact operation if the user asks for it.
 
 `read` / `edit` / `write` / `bash` follow the symlinks and work on the real member folders.
 

@@ -5,11 +5,11 @@ import { MAX_SLUG_LENGTH, slugify } from '../src/shared/naming.js'
 
 describe('buildPlan titles', () => {
   it('uses the single folder name unchanged', () => {
-    expect(buildPlan(['/Users/me/alpha']).title).toBe('alpha')
+    expect(buildPlan(['/example/alpha']).title).toBe('alpha')
   })
 
   it('joins two folder names with "and"', () => {
-    expect(buildPlan(['/Users/me/alpha', '/Users/me/beta']).title).toBe('alpha and beta')
+    expect(buildPlan(['/example/alpha', '/example/beta']).title).toBe('alpha and beta')
   })
 
   it('joins three folder names with commas and a final "and"', () => {
@@ -21,10 +21,10 @@ describe('buildPlan titles', () => {
   })
 
   it('keeps CJK folder names in the title and falls back to a workspace slug', () => {
-    const plan = buildPlan(['/Users/me/项目一', '/Users/me/项目二'])
+    const plan = buildPlan(['/example/项目一', '/example/项目二'])
     expect(plan.title).toBe('项目一 and 项目二')
     expect(plan.slug).toBe('workspace')
-    expect(buildPlan(['/Users/me/项目一'], { title: '纯中文标题' }).slug).toBe('workspace')
+    expect(buildPlan(['/example/项目一'], { title: '纯中文标题' }).slug).toBe('workspace')
   })
 
   it('builds the auto slug from folder names, never from the join connectives', () => {
@@ -34,7 +34,7 @@ describe('buildPlan titles', () => {
   })
 
   it('keeps spaces in the title and slugifies them', () => {
-    const plan = buildPlan(['/Users/me/My Folder'])
+    const plan = buildPlan(['/example/My Folder'])
     expect(plan.title).toBe('My Folder')
     expect(plan.slug).toBe('my-folder')
   })
@@ -73,8 +73,8 @@ describe('buildPlan link names', () => {
   })
 
   it('uses the final path segment as the link name', () => {
-    const plan = buildPlan(['/Users/me/work/project/'])
-    expect(plan.links).toEqual([{ name: 'project', target: '/Users/me/work/project/' }])
+    const plan = buildPlan(['/example/work/project/'])
+    expect(plan.links).toEqual([{ name: 'project', target: '/example/work/project/' }])
   })
 })
 
