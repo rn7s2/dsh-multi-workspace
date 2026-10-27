@@ -28,11 +28,11 @@ afterEach(() => {
 
 describe('isCombinedWorkspacePath', () => {
   it('matches the root itself and its descendants only', () => {
-    const root = '/Users/me/.dsh/multi-workspaces'
+    const root = '/example/.dsh/multi-workspaces'
     expect(isCombinedWorkspacePath(root, root)).toBe(true)
     expect(isCombinedWorkspacePath(join(root, 'alpha-beta'), root)).toBe(true)
     expect(isCombinedWorkspacePath(`${root}-sibling/alpha`, root)).toBe(false)
-    expect(isCombinedWorkspacePath('/Users/me/project', root)).toBe(false)
+    expect(isCombinedWorkspacePath('/example/project', root)).toBe(false)
     expect(isCombinedWorkspacePath(undefined, root)).toBe(false)
     expect(isCombinedWorkspacePath('   ', root)).toBe(false)
   })
@@ -85,23 +85,30 @@ describe('readWorkspaceMembers', () => {
 
 describe('buildCombinedWorkspaceGuidance', () => {
   it('documents the worktree, search, sandbox, and Git differences', () => {
-    const text = buildCombinedWorkspaceGuidance('/Users/me/.dsh/multi-workspaces/alpha-beta', [
-      { name: 'alpha', target: '/Users/me/code/alpha' },
-      { name: 'beta', target: '/Users/me/code/beta' },
+    const text = buildCombinedWorkspaceGuidance('/example/.dsh/multi-workspaces/alpha-beta', [
+      { name: 'alpha', target: '/example/code/alpha' },
+      { name: 'beta', target: '/example/code/beta' },
     ])
-    expect(text).toContain('/Users/me/.dsh/multi-workspaces/alpha-beta')
-    expect(text).toContain('- alpha -> /Users/me/code/alpha')
-    expect(text).toContain('- beta -> /Users/me/code/beta')
+    expect(text).toContain('/example/.dsh/multi-workspaces/alpha-beta')
+    expect(text).toContain('- alpha -> /example/code/alpha')
+    expect(text).toContain('- beta -> /example/code/beta')
     expect(text).toContain('create_worktree')
     expect(text).toContain('not a git repository')
     expect(text).toContain('git -C <member> worktree add')
     expect(text).toContain('working_directory')
     expect(text).toContain('rg --follow')
     expect(text).toContain('danger-full-access')
+    expect(text).toContain('.agents/worktrees/<name>')
+    expect(text).toContain('never create worktrees as sibling directories')
+    expect(text).toContain('Point grep/glob at a member path explicitly')
+    expect(text).toContain('the workspace-write sandbox root is the Session')
+    expect(text).toContain('suggest switching the Session access mode to Full access')
+    expect(text).toContain('do not block, refuse, or stall the task')
+    expect(text).toContain('clearly report which writes were skipped')
   })
 
   it('omits the member list when no manifest is available', () => {
-    const text = buildCombinedWorkspaceGuidance('/Users/me/.dsh/multi-workspaces/alpha')
+    const text = buildCombinedWorkspaceGuidance('/example/.dsh/multi-workspaces/alpha')
     expect(text).not.toContain('Members (')
   })
 })
