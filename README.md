@@ -47,27 +47,19 @@ other platforms are not supported yet.
 
 ## Tool caveats in combined workspaces
 
-A combined workspace root is a real directory of symlinks, not a Git repository, so a few built-in
-tools need different usage. The plugin injects this as a short per-session context for combined
-workspaces, so the model sees the guidance automatically:
+The root is a directory of symlinks, not a Git repository. The plugin injects a short per-session
+note for combined workspaces; the essentials:
 
-- **Git worktrees (`create_worktree`)** — fails at the combined root (`not a git repository`). A
-  worktree must live in the member repository's built-in pool `<member>/.agents/worktrees/<name>`:
-  either `working_directory({ cd: "<member>" })` into that repository first and use
-  `create_worktree` (the session leaves the combined workspace), or create it manually with
-  `git -C <member> worktree add <member>/.agents/worktrees/<name> -b <branch>` plus a pool-local
-  `.gitignore` containing `*` when the pool is new. Never use sibling layouts such as
-  `<repo>-<task>` or `<repo>_worktrees/<name>`.
-- **grep / glob** — a search started at the combined root does not follow the member symlinks;
-  point them at a member path explicitly, or use `bash` + `rg --follow` for a root-wide search.
-- **`workspace-write` sandbox** — the sandbox root stays the session's original directory (the
-  combined workspace), so member folders are not writable. When a needed write is denied, the
-  model mentions once that Full access is required and suggests switching the session access mode;
-  this is **advisory only** — it must not block the task, and under workspace-write/read-only it
-  continues with permitted work and reports which writes were skipped. A per-call escalation stays
-  available for one exact operation if the user asks for it.
-
-`read` / `edit` / `write` / `bash` follow the symlinks and work on the real member folders.
+- **Worktrees** — don't call `create_worktree` at the root. Use
+  `working_directory({ cd: "<member>" })` first and then `create_worktree`, or
+  `git -C <member> worktree add <member>/.agents/worktrees/<name> -b <branch>`. Never create sibling
+  worktree directories.
+- **grep / glob** — search a member path explicitly, or use `bash` + `rg --follow`; a search started
+  at the root skips the symlinked members.
+- **read / edit / write / bash** — follow the symlinks and work on the real folders.
+- **`workspace-write`** — member folders are outside the sandbox root, so writes there are denied.
+  Switching the session to Full access fixes it; when a write is denied the model mentions it once,
+  does not block the task, and continues with permitted work.
 
 ## Details
 

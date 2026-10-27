@@ -147,22 +147,16 @@ export function buildCombinedWorkspaceGuidance(
   const memberLines =
     members.length === 0
       ? ''
-      : `\nMembers (each entry is a symbolic link to an independent project folder):\n${members
-          .map(member => `- ${member.name} -> ${member.target}`)
-          .join('\n')}\n`
+      : `\nMembers:\n${members.map(member => `- ${member.name} -> ${member.target}`).join('\n')}\n`
   return `This Session's directory is a combined workspace created by dsh-multi-workspace:
 ${workspacePath}
-It is a real directory whose entries are symbolic links to independent project folders, and it is NOT a Git repository itself. Git does not descend into symbolic links, so several built-in tools behave differently here:
+It is a directory of symlinks to independent project folders, not a Git repository.
 ${memberLines}
-- create_worktree / Git worktrees: do NOT call create_worktree at this root. It runs \`git check-ref-format\` and then \`git rev-parse --show-toplevel\` in the Session directory, and the latter fails with "not a git repository" because this root is not a repository. A worktree must live in the member repository's built-in pool \`<member>/.agents/worktrees/<name>\`:
-  - preferred: change into the member first with the working_directory tool (\`{ "cd": "<member>" }\`). The Session then runs in the repository itself (it leaves this combined workspace), and create_worktree places the checkout at \`<member>/.agents/worktrees/<name>\` automatically;
-  - manual alternative while staying here: \`git -C <member> worktree add <member>/.agents/worktrees/<name> -b <branch>\`, then use absolute paths inside the checkout. If the pool directory does not exist yet, create it and put a \`.gitignore\` containing \`*\` inside it so the checkout does not dirty \`git status\` (the built-in runtime does this itself);
-  - never create worktrees as sibling directories of the repository (for example \`<repo>-<task>\`, \`<repo>_worktrees/<name>\`, or a direct child of this combined workspace root). Existing sibling checkouts shown by \`git worktree list\` are not the expected layout; do not imitate them;
-  - under the workspace-write policy this flow writes outside the Session workspace root; if it is denied, apply the sandbox note below (suggest Full access once, then continue with permitted work — do not retry in a loop).
-- grep / glob: when started at this combined workspace root, their ripgrep traversal does not follow symbolic links, so member-folder matches are silently skipped. Point grep/glob at a member path explicitly (for example path \`<member>/src\`) and they search it normally; for a root-wide search use bash with \`rg --follow <pattern> .\`.
-- read / edit / write / bash: these follow the symbolic links and operate on the real member folders; writes land in the original folders.
-- Sandbox: the workspace-write sandbox root is the Session's original directory (this combined workspace); changing directory into a member does not widen it, and every member folder resolves outside it. Writes into member folders (including \`<member>/.agents/worktrees\`) therefore fail until the Session uses danger-full-access. When a write you actually need is denied: mention it once, briefly, tell the user that combined workspaces need Full access for writes into member folders, and suggest switching the Session access mode to Full access (the access-mode selector in the message composer). This is a suggestion only — do not block, refuse, or stall the task because of it. If the user keeps workspace-write or read-only, respect that choice: continue with everything that is permitted (reads and operations inside this combined workspace root still work), clearly report which writes were skipped, and do not retry the denied operation in a loop. A per-call escalation (\`sandbox_permissions\` + \`justification\`) is available for one exact denied operation; use it only when the user asks for that operation, never automatically.
-- Git at this root fails; run Git per member with \`git -C <member> ...\`.
+- Worktrees: do not call create_worktree at this root (it fails with "not a git repository"). Create it inside the member's pool: either \`working_directory({ "cd": "<member>" })\` first and then \`create_worktree\` (the runtime makes the pool and its \`.gitignore\`), or \`git -C <member> worktree add <member>/.agents/worktrees/<name> -b <branch>\`. Never create sibling worktree directories.
+- grep/glob: a search started here skips the symlinked members; search a member path explicitly (\`<member>/...\`) or use bash \`rg --follow\`.
+- read/edit/write/bash: follow the symlinks and operate on the real member folders.
+- Sandbox: under workspace-write, member folders are outside the Session workspace root (\`working_directory\` does not widen it), so writes there are denied. If a needed write is denied, say once that switching the Session to danger-full-access allows it; continue with permitted work — do not block the task and do not retry in a loop. Per-call escalation is only for a specific operation the user asks for.
+- Git: use \`git -C <member> ...\`.
 `
 }
 
