@@ -6,7 +6,7 @@ Pick several project folders in a single native macOS dialog and DeepSeek Harnes
 one workspace: every folder becomes a symlink inside a real directory under
 `~/.dsh/multi-workspaces/`, so one session can read, edit, and run commands across all of them.
 
-![Multi-workspace in the DSH sidebar](docs/screenshot.png)
+![One DSH workspace made of three folders: the terminal lists the member symlinks and the workspace manifest](docs/screenshot.png)
 
 ## What you get
 
