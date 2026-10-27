@@ -1,6 +1,6 @@
 {
   "name": "dsh-multi-workspace",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Multi-workspace support for the DeepSeek Harness Web GUI: pick several folders, symlink them into one real workspace under ~/.dsh/multi-workspaces, and name it \"A, B and C\".",
   "license": "MIT",
   "type": "module",
