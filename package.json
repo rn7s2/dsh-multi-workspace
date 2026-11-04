@@ -5,6 +5,9 @@
   "description": "Multi-workspace support for the DeepSeek Harness Web GUI: pick several folders, symlink them into one real workspace under ~/.dsh/multi-workspaces, and name it \"A, B and C\".",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "dsh": ">=0.2.1-rc.5 <0.3.0"
+  },
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
