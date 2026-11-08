@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { parsePickerOutput, pickNativeDirectories } from '../src/host/native-picker.js'
+import {
+  nativePanelBlocker,
+  parsePickerOutput,
+  pickNativeDirectories,
+} from '../src/host/native-picker.js'
 
 describe('parsePickerOutput', () => {
   it('returns null for empty output (operator cancelled)', () => {
@@ -64,5 +68,31 @@ describe('pickNativeDirectories', () => {
     await expect(pickNativeDirectories('pick', { platform: 'darwin', run })).rejects.toThrow(
       /command not found/,
     )
+  })
+})
+
+describe('nativePanelBlocker', () => {
+  it('blocks every non-macOS platform', () => {
+    expect(nativePanelBlocker({ platform: 'linux' })).toBe('platform')
+    expect(nativePanelBlocker({ platform: 'win32' })).toBe('platform')
+  })
+
+  it('allows a local macOS desktop without remote trust', () => {
+    expect(
+      nativePanelBlocker({ platform: 'darwin', env: {}, allowsRemoteAuthorities: false }),
+    ).toBeNull()
+  })
+
+  it('blocks an SSH launch', () => {
+    expect(nativePanelBlocker({ platform: 'darwin', env: { SSH_CONNECTION: 'remote' } })).toBe(
+      'ssh',
+    )
+    expect(nativePanelBlocker({ platform: 'darwin', env: { SSH_TTY: '/dev/pts/1' } })).toBe('ssh')
+  })
+
+  it('blocks a Web deployment that trusts remote authorities', () => {
+    expect(
+      nativePanelBlocker({ platform: 'darwin', env: {}, allowsRemoteAuthorities: true }),
+    ).toBe('remote-authority')
   })
 })

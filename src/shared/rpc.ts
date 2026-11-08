@@ -24,6 +24,12 @@ export const PICK_METHOD = 'pick'
 /** Full Remote endpoint of the pick method. */
 export const PICK_ENDPOINT = `${NAMESPACE}/${PICK_METHOD}`
 
+/** Remote endpoint method name: list one directory level for the in-app browser. */
+export const LIST_METHOD = 'list'
+
+/** Full Remote endpoint of the list method. */
+export const LIST_ENDPOINT = `${NAMESPACE}/${LIST_METHOD}`
+
 /** Fixed subdirectory of the dsh home that holds every real combined workspace. */
 export const WORKSPACE_ROOT_SEGMENTS = ['multi-workspaces'] as const
 
@@ -88,3 +94,21 @@ export const pickMessageSchema = z.string().min(1).max(200)
 
 /** Result codec of `multiWorkspace/pick`: picked absolute paths, or null when cancelled. */
 export const pickResultSchema = z.union([z.null(), z.array(z.string().min(1))])
+
+const zDirectoryEntry = z.object({
+  name: z.string().min(1),
+  path: z.string().min(1),
+  hidden: z.boolean(),
+})
+
+/** Parameter codec of `multiWorkspace/list`: an absolute directory, or null for the home directory. */
+export const listPathSchema = z.union([z.null(), z.string().min(1)])
+
+/** Result codec of `multiWorkspace/list`: one bounded directory level and its ancestry. */
+export const listingResultSchema = z.object({
+  path: z.string().min(1),
+  home: z.string().min(1),
+  crumbs: z.array(zDirectoryEntry),
+  entries: z.array(zDirectoryEntry),
+  truncated: z.boolean(),
+})

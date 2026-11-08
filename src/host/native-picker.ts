@@ -73,6 +73,36 @@ export interface NativePickerOptions {
   command?: string
 }
 
+/** Facts that make a local macOS folder panel unusable for this Client. */
+export type NativePanelBlocker = 'platform' | 'ssh' | 'remote-authority'
+
+/**
+ * Decide whether this host can show an OS folder panel to the operator.
+ *
+ * The panel opens on the host's display, so it only makes sense when the host
+ * is a local macOS machine, not an SSH launch, and not a Web deployment that
+ * admits remote authorities. Anything else falls back to the in-app browser.
+ *
+ * @param options - platform, environment, and the Connection trust fact.
+ * @returns the blocking reason, or null when the native panel may be used.
+ */
+export function nativePanelBlocker(
+  options: {
+    platform?: NodeJS.Platform
+    env?: NodeJS.ProcessEnv
+    allowsRemoteAuthorities?: boolean
+  } = {},
+): NativePanelBlocker | null {
+  const platform = options.platform ?? process.platform
+  if (platform !== 'darwin') return 'platform'
+  const env = options.env ?? process.env
+  if ((env['SSH_CONNECTION'] ?? '').trim() !== '' || (env['SSH_TTY'] ?? '').trim() !== '') {
+    return 'ssh'
+  }
+  if (options.allowsRemoteAuthorities === true) return 'remote-authority'
+  return null
+}
+
 /**
  * Run one native command without a shell and collect its output.
  * @param command - executable name resolved through PATH.

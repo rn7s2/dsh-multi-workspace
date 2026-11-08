@@ -4,8 +4,9 @@
  * Mounted as a dependency-free plain ESM Cordis plugin: it registers one
  * `multiWorkspace` service through `ctx.provide()` and publishes a Typert
  * Remote manifest from `./typert`. The Client flow calls `multiWorkspace/pick`
- * for the native macOS multi-folder panel and `multiWorkspace/create` for the
- * combined workspace; this half materializes the real combined directory,
+ * for the native macOS multi-folder panel, `multiWorkspace/list` for the in-app
+ * browser used by remote or non-macOS hosts, and `multiWorkspace/create` for
+ * the combined workspace; this half materializes the real combined directory,
  * symlinks the picked folders into it, and registers the durable Workspace
  * through `ctx.workspaceRegistry`.
  *
@@ -16,8 +17,10 @@ import { isAbsolute, join } from 'node:path'
 import { SelectionError } from './core.js'
 import { materializeWorkspace, removeWorkspaceDirectory } from './fs.js'
 import type { MaterializedWorkspace } from './fs.js'
-import { pickNativeDirectories } from './native-picker.js'
+import { buildDirectoryListing, ListingError } from './listing.js'
+import { nativePanelBlocker, pickNativeDirectories } from './native-picker.js'
 import { registerCombinedWorkspaceGuidance, type SystemPromptLike } from './prompt.js'
+import type { DirectoryListing } from '../shared/listing.js'
 import {
   NAMESPACE,
   createRequestSchema,
@@ -95,8 +98,16 @@ export interface MultiWorkspaceService {
    * Open the native macOS multi-folder panel.
    * @param message - prompt shown inside the panel.
    * @returns the picked absolute folder paths, or null when cancelled.
+   * @throws {RemoteFailure} `multi-workspace/pick-unavailable` when this host
+   *   cannot show a local macOS panel; the Client then opens its in-app browser.
    */
   pick(message: string): Promise<string[] | null>
+  /**
+   * List one directory level for the in-app browser.
+   * @param path - absolute directory; null lists the host home directory.
+   * @returns the bounded level and its ancestry.
+   */
+  list(path: string | null): Promise<DirectoryListing>
   /**
    * Create a combined workspace from two or more folders.
    * @param request - folder paths and an optional title override.
@@ -118,10 +129,42 @@ function errorMessage(error: unknown): string {
 export function createMultiWorkspaceService(ctx: HostContext, rootDir: string): MultiWorkspaceService {
   const service = {
     async pick(message: string): Promise<string[] | null> {
+      const connection = ctx.get('connection') as
+        | { readonly allowsRemoteAuthorities?: boolean }
+        | undefined
+      const blocker = nativePanelBlocker({
+        ...(connection?.allowsRemoteAuthorities === undefined
+          ? {}
+          : { allowsRemoteAuthorities: connection.allowsRemoteAuthorities }),
+      })
+      if (blocker !== null) {
+        throw new RemoteFailure(
+          'multi-workspace/pick-unavailable',
+          `The native folder panel is unavailable on this host (${blocker}); use the in-app browser instead.`,
+          { reason: blocker },
+        )
+      }
       try {
         return await pickNativeDirectories(message)
       } catch (error) {
-        throw new RemoteFailure('multi-workspace/pick-failed', errorMessage(error))
+        // A panel that exists but cannot run is still recoverable: let the
+        // Client fall back to the browser dialog rather than dead-end.
+        throw new RemoteFailure('multi-workspace/pick-unavailable', errorMessage(error), {
+          reason: 'native-failed',
+        })
+      }
+    },
+    async list(path: string | null): Promise<DirectoryListing> {
+      try {
+        return await buildDirectoryListing(path ?? undefined)
+      } catch (error) {
+        if (error instanceof ListingError) {
+          throw new RemoteFailure('multi-workspace/list-failed', error.message, {
+            reason: error.code,
+            path,
+          })
+        }
+        throw new RemoteFailure('multi-workspace/list-failed', errorMessage(error), { path })
       }
     },
     async create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateResult> {
