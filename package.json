@@ -1,8 +1,8 @@
 {
   "name": "dsh-multi-workspace",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": false,
-  "description": "Multi-workspace support for the DeepSeek Harness Web GUI: pick several folders, symlink them into one real workspace under ~/.dsh/multi-workspaces, and name it \"A, B and C\".",
+  "description": "Multi-workspace support for the DeepSeek Harness Web GUI: pick several folders (native macOS panel or in-app browser), symlink them into one real workspace under ~/.dsh/multi-workspaces, and name it \"A, B and C\".",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -48,10 +48,15 @@
     }
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.0",
     "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0",
     "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4",
     "zod": "4.4.3"

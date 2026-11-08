@@ -2,17 +2,22 @@
 
 **One workspace. Many folders.**
 
-Pick several project folders in a single native macOS dialog and DeepSeek Harness treats them as
-one workspace: every folder becomes a symlink inside a real directory under
-`~/.dsh/multi-workspaces/`, so one session can read, edit, and run commands across all of them.
+Pick several project folders in one picker — the native macOS panel on a local desktop, or the
+plugin's in-app browser on the Web — and DeepSeek Harness treats them as one workspace: every
+folder becomes a symlink inside a real directory under `~/.dsh/multi-workspaces/`, so one session
+can read, edit, and run commands across all of them.
 
 ![One DSH workspace made of three folders: the terminal lists the member symlinks and the workspace manifest](docs/screenshot.png)
 
 ## What you get
 
-- **Native multi-select.** Both "Add workspace" entry points — the sidebar folder-plus action and
-  the prompt-above **Choose workspace → Add workspace…** menu — open a normal macOS folder panel
-  where you can select several folders at once.
+- **Multi-select everywhere.** Both "Add workspace" entry points — the sidebar folder-plus action
+  and the prompt-above **Choose workspace → Add workspace…** menu — let you select several folders
+  at once: a normal macOS folder panel on a local desktop, or the plugin's in-app browser in the Web
+  profile.
+- **Web profile ready.** The in-app browser lists the Host's directories over its own Remote, so a
+  remote Linux host with no display can still pick folders from your browser. Nothing opens on the
+  host's screen.
 - **One workspace, all folders.** The workspace is a real directory whose entries are symlinks to
   your folders, so `alpha/` and `beta/` sit side by side in the same session.
 - **Hands-off naming.** Workspaces are named after your folders: `alpha`, `alpha and beta`,
@@ -39,8 +44,8 @@ cd dsh-multi-workspace && pnpm install && pnpm build
 dsh plugin --profile desktop add "$PWD"
 ```
 
-Requires **macOS** and DeepSeek Harness **0.2.1-rc.3+**. The picker is the native macOS panel;
-other platforms are not supported yet.
+Requires DeepSeek Harness **0.2.1-rc.3+**. On a local macOS desktop the picker is the native folder
+panel; in the Web profile it is the plugin's in-app browser, so remote Linux hosts work too.
 
 > Troubleshooting: if the "Add workspace" button disappears, the bundle was installed without its
 > committed `lib/` artifacts. Reinstall with the commands above and restart.
@@ -68,6 +73,8 @@ note for combined workspaces; the essentials:
 - Override the root with the plugin row's `config.rootDir` (absolute path).
 - Duplicate folder names get `-2`, `-3`, … on the symlink; the display title keeps the plain
   folder names.
+- In the Web dialog, one selected folder opens directly; two or more create the combined workspace.
+  Hidden folders are shown on demand, and directory levels are bounded by the Host.
 
 ## Development
 
@@ -76,7 +83,7 @@ pnpm run typecheck && pnpm run test && pnpm run build
 ```
 
 `lib/` is committed because GitHub installs do not run a build — rebuild and commit it with every
-source change. See [dev/](dev/) for an isolated rc.3 end-to-end instance.
+source change. See [dev/](dev/) for an isolated end-to-end instance.
 
 ## License
 

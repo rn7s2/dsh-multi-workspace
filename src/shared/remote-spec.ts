@@ -1,5 +1,5 @@
 /**
- * The two Typert Remote methods this package publishes. The same spec feeds
+ * The three Typert Remote methods this package publishes. The same spec feeds
  * the Host manifest (`src/host/typert.ts`) and the Client contribution
  * (`src/client/remote.ts`), so the two faces cannot drift.
  *
@@ -9,11 +9,14 @@ import { z } from 'zod'
 import type { RemoteCodecSpec, RemoteSpec } from './remote-info.js'
 import {
   CREATE_ENDPOINT,
+  LIST_ENDPOINT,
   NAMESPACE,
   PACKAGE_NAME,
   PICK_ENDPOINT,
   createRequestSchema,
   createResultSchema,
+  listPathSchema,
+  listingResultSchema,
   pickMessageSchema,
   pickResultSchema,
 } from './rpc.js'
@@ -66,6 +69,39 @@ const pickResultJsonSchema = {
   description: 'The picked absolute folder paths, or null when the operator cancelled.',
 } as const
 
+const entryJsonSchema = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' },
+    path: { type: 'string' },
+    hidden: { type: 'boolean' },
+  },
+  required: ['name', 'path', 'hidden'],
+  additionalProperties: false,
+} as const
+
+const listingJsonSchema = {
+  type: 'object',
+  properties: {
+    path: { type: 'string', description: 'Absolute path of the listed directory.' },
+    home: { type: 'string', description: "The host account's home directory." },
+    crumbs: {
+      type: 'array',
+      items: entryJsonSchema,
+      description: 'Ancestor chain from the filesystem root to the listed directory inclusive.',
+    },
+    entries: {
+      type: 'array',
+      items: entryJsonSchema,
+      description: 'Direct child directories, name-sorted; symlinks to directories included.',
+    },
+    truncated: { type: 'boolean', description: 'Whether the level was cut at the result bound.' },
+  },
+  required: ['path', 'home', 'crumbs', 'entries', 'truncated'],
+  additionalProperties: false,
+  description: 'One directory level and its ancestry for the in-app browser.',
+} as const
+
 /** Strict parameter codec for the create request object. */
 const requestCodec: RemoteCodecSpec = {
   mode: 'strict',
@@ -102,6 +138,24 @@ const pickResultCodec: RemoteCodecSpec = {
   description: 'the picked absolute folder paths, or null when the operator cancelled.',
 }
 
+/** Parameter codec of list: an absolute directory, or null for the home directory. */
+const listPathCodec: RemoteCodecSpec = {
+  mode: 'strict',
+  typeSymbol: `${PACKAGE_NAME}#ListPath`,
+  create: () => listPathSchema,
+  jsonSchema: { oneOf: [{ type: 'null' }, { type: 'string', minLength: 1 }] },
+  description: 'absolute directory to list; null lists the home directory.',
+}
+
+/** Result codec of list: one bounded directory level and its ancestry. */
+const listingResultCodec: RemoteCodecSpec = {
+  mode: 'strict',
+  typeSymbol: `${PACKAGE_NAME}#DirectoryListing`,
+  create: () => listingResultSchema,
+  jsonSchema: listingJsonSchema,
+  description: 'one directory level and its ancestry for the in-app browser.',
+}
+
 /**
  * Build the compiler-shaped Remote spec both faces publish.
  * @returns the Remote spec accepted by `createTypertRemoteInfo()`.
@@ -110,10 +164,26 @@ export function buildRemoteSpec(): RemoteSpec {
   return {
     package: PACKAGE_NAME,
     methods: {
+      [LIST_ENDPOINT]: {
+        service: NAMESPACE,
+        description:
+          'List one directory level for the in-app browser: absolute child directories only, name-sorted, with hidden flags and ancestry.',
+        invocation: { kind: 'direct' },
+        parameters: [
+          {
+            name: 'path',
+            description: 'absolute directory to list; null lists the home directory.',
+            source: 'json',
+            codec: listPathCodec,
+          },
+        ],
+        result: listingResultCodec,
+        sourceLocation: { file: 'src/host/listing.ts', line: 1, column: 1 },
+      },
       [PICK_ENDPOINT]: {
         service: NAMESPACE,
         description:
-          'Open the native macOS folder panel with multiple selection enabled and return the picked absolute folder paths, or null when cancelled. Only macOS is supported for now.',
+          'Open the native macOS folder panel with multiple selection enabled and return the picked absolute folder paths, or null when cancelled. A host without a local macOS display refuses and the Client opens the in-app browser instead.',
         invocation: { kind: 'direct' },
         parameters: [
           {

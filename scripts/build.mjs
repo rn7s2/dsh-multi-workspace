@@ -20,6 +20,7 @@ const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 /** Modules the Web page's module table provides; the client bundle must not inline them. */
 const CLIENT_EXTERNAL = [
   'react',
+  'react-dom',
   'react/jsx-runtime',
   '@deepseek-ai/dsh-client-ui-primitives',
   'zod',
