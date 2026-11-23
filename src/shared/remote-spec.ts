@@ -84,6 +84,10 @@ const entryJsonSchema = {
     name: { type: 'string' },
     path: { type: 'string' },
     hidden: { type: 'boolean' },
+    real: {
+      type: 'string',
+      description: 'Canonical spelling after following symlinks; members are recorded canonically.',
+    },
   },
   required: ['name', 'path', 'hidden'],
   additionalProperties: false,

@@ -18,6 +18,29 @@ import type { SelectionPlan } from './core.js'
 /** How many times a manifest write is retried after a rename race. */
 const MAX_MANIFEST_ATTEMPTS = 3
 
+/**
+ * Title values that must not reach a manifest: the value the registry kept when
+ * a publication failed. Without this, the stale record echoed back by the next
+ * domain event would be read as an operator's manual choice.
+ */
+const suppressedTitles = new Map<string, string>()
+
+/**
+ * Ignore the next sync of one title for a directory, because it is the stale
+ * registry value left behind by a publication that failed.
+ * @param dir - combined workspace directory.
+ * @param title - title the registry still holds.
+ */
+export async function suppressStaleTitle(dir: string, title: string): Promise<void> {
+  const key = await realpath(dir).catch(() => resolve(dir))
+  suppressedTitles.set(key, title)
+}
+
+/** Forget a suppression once a publication has succeeded. */
+export async function clearStaleTitle(dir: string): Promise<void> {
+  suppressedTitles.delete(await realpath(dir).catch(() => resolve(dir)))
+}
+
 /** Tail of the mutation chain of each directory, keyed by its resolved path. */
 const mutationTails = new Map<string, Promise<void>>()
 
@@ -125,10 +148,19 @@ export interface EditOptions {
 
 /** Result of an edit. */
 export interface EditedWorkspace {
-  /** The workspace after the edit. */
+  /**
+   * The workspace after the edit. Its `title` is still the previous one: the
+   * caller publishes the new title first and only then persists it, so a failed
+   * publication cannot leave the manifest claiming a title the registry does
+   * not hold.
+   */
   workspace: CombinedWorkspace
   /** Links added or removed by the edit. */
   changed: WorkspaceLink[]
+  /** Title this edit implies; publish it, then persist it with {@link syncWorkspaceTitle}. */
+  title: string
+  /** Whether {@link EditedWorkspace.title} is derived from the folders. */
+  titleAuto: boolean
 }
 
 /**
@@ -278,7 +310,8 @@ export async function materializeWorkspace(options: MaterializeOptions): Promise
 
   const reusable = await findReusableDirectory(rootDir, sources)
   if (reusable !== undefined) {
-    const adopted = await adoptDirectory(reusable, plan)
+    // Adoption rewrites the manifest, so it takes the same lock an edit does.
+    const adopted = await withWorkspaceLock(reusable, () => adoptDirectory(reusable, plan))
     return {
       dir: adopted.dir,
       id: adopted.id,
@@ -372,7 +405,8 @@ async function addFoldersLocked(
 
   const links = [...workspace.links, ...added]
   try {
-    return { workspace: await commitManifest(workspace, links, options), changed: added }
+    const next = await commitMembers(workspace, links, options)
+    return { ...next, changed: added }
   } catch (error) {
     await unlinkQuietly(workspace.dir, created)
     throw error
@@ -440,7 +474,8 @@ async function removeFoldersLocked(
   }
 
   try {
-    return { workspace: await commitManifest(workspace, remaining, options), changed: removed }
+    const next = await commitMembers(workspace, remaining, options)
+    return { ...next, changed: removed }
   } catch (error) {
     await restoreLinks(workspace.dir, unlinked)
     throw error
@@ -590,35 +625,42 @@ async function nextTitle(
 }
 
 /**
- * Write the manifest for an edited workspace and read it back.
+ * Persist the member list of an edited workspace, leaving the recorded title
+ * alone. The caller publishes the title afterwards and then calls
+ * {@link syncWorkspaceTitle}: a title the registry never accepted must not sit
+ * in the manifest, where a later sync would read it as a manual choice.
  * @param workspace - workspace before the change.
  * @param links - members after the change.
  * @param options - sibling titles and the workspace root.
- * @returns the workspace projection after the change.
+ * @returns the workspace projection and the title the edit implies.
  */
-async function commitManifest(
+async function commitMembers(
   workspace: CombinedWorkspace,
   links: readonly WorkspaceLink[],
   options: EditOptions,
-): Promise<CombinedWorkspace> {
-  const { title, titleAuto } = await nextTitle(workspace, links, options)
+): Promise<Omit<EditedWorkspace, 'changed'>> {
+  const next = await nextTitle(workspace, links, options)
   const manifest: WorkspaceManifest = {
     version: 2,
     kind: 'dsh-multi-workspace',
     id: workspace.id,
     createdAt: workspace.createdAt === '' ? new Date().toISOString() : workspace.createdAt,
-    title,
-    titleAuto,
+    title: workspace.title,
+    titleAuto: workspace.titleAuto,
     links: links.map(link => ({ name: link.name, target: link.target })),
   }
   await writeManifest(workspace.dir, manifest)
   return {
-    dir: workspace.dir,
-    id: workspace.id,
-    title,
-    titleAuto,
-    createdAt: workspace.createdAt,
-    links: [...links],
+    workspace: {
+      dir: workspace.dir,
+      id: workspace.id,
+      title: workspace.title,
+      titleAuto: workspace.titleAuto,
+      createdAt: workspace.createdAt,
+      links: [...links],
+    },
+    title: next.title,
+    titleAuto: next.titleAuto,
   }
 }
 
@@ -874,20 +916,31 @@ function messageOf(error: unknown): string {
  * membership change cannot overwrite the operator's choice.
  * @param dir - combined workspace directory.
  * @param title - durable Workspace title.
+ * @param titleAuto - provenance to record; omitted means "derive it from the members".
  * @returns true when the manifest changed.
  */
-export async function syncWorkspaceTitle(dir: string, title: string): Promise<boolean> {
+export async function syncWorkspaceTitle(
+  dir: string,
+  title: string,
+  titleAuto?: boolean,
+): Promise<boolean> {
   return await withWorkspaceLock(dir, async () => {
+    const key = await realpath(dir).catch(() => resolve(dir))
+    if (suppressedTitles.get(key) === title) {
+      suppressedTitles.delete(key)
+      return false
+    }
     const workspace = await readCombinedWorkspace(dir)
-    if (workspace === null || workspace.title === title) return false
-    const titleAuto = isAutoTitle(title, workspace.links.map(link => link.target))
+    if (workspace === null) return false
+    const nextAuto = titleAuto ?? isAutoTitle(title, workspace.links.map(link => link.target))
+    if (workspace.title === title && workspace.titleAuto === nextAuto) return false
     await writeManifest(dir, {
       version: 2,
       kind: 'dsh-multi-workspace',
       id: workspace.id,
       createdAt: workspace.createdAt === '' ? new Date().toISOString() : workspace.createdAt,
       title,
-      titleAuto,
+      titleAuto: nextAuto,
       links: workspace.links,
     })
     return true

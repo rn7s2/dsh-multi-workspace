@@ -12,6 +12,7 @@ import {
   readCombinedWorkspaceWithin,
   removeFolders,
   resolveSources,
+  suppressStaleTitle,
   syncWorkspaceTitle,
 } from '../src/host/fs.js'
 import { HARD_MAX_PATHS } from '../src/shared/naming.js'
@@ -412,17 +413,22 @@ describe('addFolders', () => {
     const gamma = await makeSource('gamma')
     const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
 
-    const { workspace, changed } = await addFolders(created.dir, [gamma], { rootDir })
+    const { workspace, changed, ...result } = await addFolders(created.dir, [gamma], { rootDir })
 
     expect(changed).toEqual([{ name: 'gamma', target: await realpath(gamma) }])
     expect(workspace.links.map(link => link.name)).toEqual(['alpha', 'beta', 'gamma'])
-    expect(workspace.title).toBe('alpha, beta and gamma')
-    expect(workspace.titleAuto).toBe(true)
+    // The edit reports the title it implies; the manifest follows only once the
+    // caller has published that title.
+    expect(result.title).toBe('alpha, beta and gamma')
+    expect(result.titleAuto).toBe(true)
     expect((await lstat(join(created.dir, 'gamma'))).isSymbolicLink()).toBe(true)
     expect(await readManifest(created.dir)).toMatchObject({
-      title: 'alpha, beta and gamma',
+      title: 'alpha and beta',
       links: workspace.links,
     })
+
+    await syncWorkspaceTitle(created.dir, result.title, result.titleAuto)
+    expect((await readManifest(created.dir)).title).toBe('alpha, beta and gamma')
   })
 
   it('suffixes a name that the workspace already uses', async () => {
@@ -455,12 +461,12 @@ describe('addFolders', () => {
     const gamma = await makeSource('gamma')
     const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
 
-    const { workspace } = await addFolders(created.dir, [gamma], {
+    const { title } = await addFolders(created.dir, [gamma], {
       rootDir,
       takenTitles: ['alpha, beta and gamma'],
     })
 
-    expect(workspace.title).toBe('alpha, beta and gamma (2)')
+    expect(title).toBe('alpha, beta and gamma (2)')
   })
 
   it('rejects a folder that is already a member', async () => {
@@ -520,11 +526,11 @@ describe('removeFolders', () => {
     const gamma = await makeSource('gamma')
     const created = await materializeWorkspace({ rootDir, paths: [alpha, beta, gamma] })
 
-    const { workspace, changed } = await removeFolders(created.dir, ['beta'], { rootDir })
+    const { workspace, changed, ...result } = await removeFolders(created.dir, ['beta'], { rootDir })
 
     expect(changed.map(link => link.name)).toEqual(['beta'])
     expect(workspace.links.map(link => link.name)).toEqual(['alpha', 'gamma'])
-    expect(workspace.title).toBe('alpha and gamma')
+    expect(result.title).toBe('alpha and gamma')
     await expect(lstat(join(created.dir, 'beta'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await stat(beta)).isDirectory()).toBe(true)
     expect((await readManifest(created.dir)).links.map(link => link.name)).toEqual(['alpha', 'gamma'])
@@ -651,10 +657,10 @@ describe('review fixes', () => {
     })
     expect(created.title).toBe('alpha and beta (2)')
 
-    const { workspace } = await addFolders(created.dir, [gamma], { rootDir })
+    const { title, titleAuto } = await addFolders(created.dir, [gamma], { rootDir })
 
-    expect(workspace.title).toBe('alpha, beta and gamma')
-    expect(workspace.titleAuto).toBe(true)
+    expect(title).toBe('alpha, beta and gamma')
+    expect(titleAuto).toBe(true)
   })
 
   it('removes a member whose link was deleted by hand', async () => {
@@ -719,5 +725,42 @@ describe('review fixes', () => {
 
     await expect(readCombinedWorkspaceWithin(foreign, rootDir)).resolves.toBeNull()
     await expect(readCombinedWorkspace(foreign)).resolves.not.toBeNull()
+  })
+})
+
+describe('concurrent adoption', () => {
+  it('does not drop a member added while the directory was being adopted', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
+    await Promise.all([
+      materializeWorkspace({ rootDir, paths: [alpha, beta] }),
+      addFolders(created.dir, [gamma], { rootDir }),
+    ])
+
+    const workspace = await readCombinedWorkspace(created.dir)
+    expect(workspace?.links.map(link => link.name).sort()).toEqual(['alpha', 'beta', 'gamma'])
+  })
+})
+
+describe('failed title publication', () => {
+  it('keeps a suppressed stale title out of the manifest', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    await suppressStaleTitle(created.dir, 'alpha and beta')
+
+    const changed = await syncWorkspaceTitle(created.dir, 'alpha and beta')
+
+    expect(changed).toBe(false)
+    expect((await readManifest(created.dir))).toMatchObject({
+      title: 'alpha and beta',
+      titleAuto: true,
+    })
+    // The suppression is one-shot: the next sync of the same value applies.
+    await expect(syncWorkspaceTitle(created.dir, 'My Workspace')).resolves.toBe(true)
+    expect((await readManifest(created.dir)).titleAuto).toBe(false)
   })
 })

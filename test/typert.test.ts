@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { TYPERT } from '../src/host/typert.js'
+import { listingResultSchema, workspaceInfoSchema } from '../src/shared/rpc.js'
 
 /** Minimal shape of one generated invocation the assertions read. */
 interface Invocation {
@@ -41,6 +42,13 @@ describe('Host Typert manifest', () => {
     })
   })
 
+  it('carries the canonical entry path on the wire so the browser can grey members out', () => {
+    const schema = list?.result.jsonSchema as
+      | { properties: { entries: { items: { properties: Record<string, unknown> } } } }
+      | undefined
+    expect(schema?.properties.entries.items.properties['real']).toBeDefined()
+  })
+
   it('keeps the existing pick and create invocations', () => {
     expect(
       invocations.some(entry => entry.namespace === 'multiWorkspace' && entry.method === 'pick'),
@@ -76,5 +84,35 @@ describe('Host Typert manifest', () => {
     expect(names).toEqual(
       expect.arrayContaining(['list', 'pick', 'create', 'inspect', 'addFolders', 'removeFolders']),
     )
+  })
+})
+
+describe('wire codecs keep the canonical entry path', () => {
+  it('preserves `real` through the listing result codec', () => {
+    const parsed = listingResultSchema.parse({
+      path: '/home/me',
+      home: '/home/me',
+      crumbs: [{ name: '/', path: '/', hidden: false }],
+      entries: [
+        { name: 'alpha', path: '/var/alpha', hidden: false, real: '/data/alpha' },
+        { name: 'beta', path: '/home/me/beta', hidden: false },
+      ],
+      truncated: false,
+    })
+    expect(parsed.entries[0]?.real).toBe('/data/alpha')
+    expect(parsed.entries[1]?.real).toBeUndefined()
+  })
+
+  it('preserves the in-use flag through the workspace info codec', () => {
+    const parsed = workspaceInfoSchema.parse({
+      path: '/ws',
+      title: 'alpha and beta',
+      titleAuto: true,
+      members: [
+        { name: 'alpha', target: '/data/alpha', inUse: true },
+        { name: 'beta', target: '/data/beta' },
+      ],
+    })
+    expect(parsed.members[0]?.inUse).toBe(true)
   })
 })

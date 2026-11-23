@@ -222,6 +222,12 @@ const zDirectoryEntry = z.object({
   name: z.string().min(1),
   path: z.string().min(1),
   hidden: z.boolean(),
+  /**
+   * Canonical spelling after following symlinks. Without this on the wire the
+   * browser cannot recognise a member it reaches through a linked path, and
+   * the already-in-workspace rows stop being greyed out.
+   */
+  real: z.string().min(1).optional(),
 })
 
 /** Parameter codec of `multiWorkspace/list`: an absolute directory, or null for the home directory. */
