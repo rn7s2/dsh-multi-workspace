@@ -81,11 +81,17 @@ note for combined workspaces; the essentials:
 - Picking exactly the folders that an existing directory already holds reuses that directory instead
   of allocating a second one — including a directory whose workspace was deleted, provided that
   workspace never owned a session.
-- Deleting a workspace removes its directory only when no session ever attached to it; otherwise the
-  directory and its links survive, because those sessions keep that path as their recorded cwd. A
-  title renamed through the shipped dialog is written back into the manifest, so a later add or
-  remove cannot undo it.
-- Two workspaces that would derive the same title get ` (2)`, ` (3)`, … in the automatic case.
+- Deleting a workspace is careful: only the links named by the manifest and the manifest itself are
+  removed, then the directory is dropped once it is empty. A file you put in there — or a member
+  entry that is no longer a link — keeps the directory alive, and it is adopted again if the same
+  folders are picked later. A workspace that ever owned a session keeps its directory too, because
+  those sessions hold that path as their recorded cwd.
+- The removal dialog marks members a running session is working in, and warns before removing them.
+- A title renamed through the shipped dialog is written back into the manifest, so a later add or
+  remove cannot undo it. Two workspaces that would derive the same title get ` (2)`, ` (3)`, … and
+  keep updating as folders change.
+- The Workspace menu rows are an addition, not a requirement: a harness without the context-menu
+  service still loads this plugin and keeps creating workspaces.
 - Override the root with the plugin row's `config.rootDir` (absolute path).
 - Duplicate folder names get `-2`, `-3`, … on the symlink; the display title keeps the plain
   folder names.

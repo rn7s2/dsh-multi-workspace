@@ -41,7 +41,11 @@ export interface MultiFolderDialogOverrides {
   subtitle?: string
   /** Confirm button label; defaults to the create/open copy. */
   confirm?: string
-  /** Absolute paths already inside the workspace; their rows are shown disabled. */
+  /** Confirm button label while the request is in flight. */
+  pending?: string
+  /** Failure from an earlier attempt, shown without discarding the selection. */
+  error?: string | null
+  /** Canonical paths already inside the workspace; their rows are shown disabled. */
   exclude?: readonly string[]
 }
 
@@ -268,6 +272,12 @@ export const panelStyles = {
 export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactElement | null {
   const { list, t, busy, onConfirm, onCancel, overrides } = props
   const excluded = React.useMemo(() => new Set(overrides?.exclude ?? []), [overrides])
+  const isExcluded = React.useCallback(
+    // Members are recorded canonically, so compare the resolved spelling: a
+    // browsed path may reach the same folder through a link.
+    (entry: DirectoryEntry): boolean => excluded.has(entry.real ?? entry.path),
+    [excluded],
+  )
   const [listing, setListing] = React.useState<DirectoryListing | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
@@ -324,7 +334,7 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
   )
 
   const toggle = (entry: DirectoryEntry): void => {
-    if (disabled || excluded.has(entry.path)) return
+    if (disabled || isExcluded(entry)) return
     setSelected(current => toggleSelection(current, entry))
   }
 
@@ -338,13 +348,16 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
       await onConfirm(paths)
     } catch (failure) {
       setError(messageOf(failure))
+    } finally {
+      // The owner may settle the failure itself and keep this dialog open, so
+      // the busy state always comes back down.
       setSubmitting(false)
     }
   }
 
   if (typeof document === 'undefined') return null
   const confirmLabel = submitting
-    ? t('dialog.creating')
+    ? (overrides?.pending ?? t('dialog.creating'))
     : overrides?.confirm !== undefined
       ? overrides.confirm
       : selected.length === 1
@@ -440,8 +453,8 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
                   <input
                     type="checkbox"
                     style={panelStyles.checkbox}
-                    checked={selectionHas(selected, entry.path) || excluded.has(entry.path)}
-                    disabled={disabled || excluded.has(entry.path)}
+                    checked={selectionHas(selected, entry.path) || isExcluded(entry)}
+                    disabled={disabled || isExcluded(entry)}
                     aria-label={entry.name}
                     onChange={() => toggle(entry)}
                   />
@@ -454,7 +467,7 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
                   >
                     {entry.name}
                   </button>
-                  {excluded.has(entry.path) ? (
+                  {isExcluded(entry) ? (
                     <span style={panelStyles.hiddenNote}>{t('dialog.alreadyMember')}</span>
                   ) : entry.hidden ? (
                     <span style={panelStyles.hiddenNote}>{t('dialog.hiddenTag')}</span>
@@ -487,6 +500,12 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
             {selected.length >= HARD_MAX_PATHS ? (
               <span style={panelStyles.capNote}>{t('dialog.max')}</span>
             ) : null}
+          </div>
+        ) : null}
+
+        {overrides?.error !== undefined && overrides.error !== null ? (
+          <div role="alert" style={panelStyles.error}>
+            {overrides.error}
           </div>
         ) : null}
 

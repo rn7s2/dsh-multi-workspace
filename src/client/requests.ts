@@ -7,7 +7,7 @@
  * @module dsh-multi-workspace/client/requests
  */
 import * as React from 'react'
-import type { WorkspaceLink } from '../shared/rpc.js'
+import type { WorkspaceMemberInfo } from '../shared/rpc.js'
 
 /** What the surface should show: append folders, or drop members. */
 export type FoldersRequestKind = 'add' | 'remove'
@@ -20,7 +20,7 @@ export interface FoldersRequest {
   /** Durable title at the time the menu opened, shown in the dialog header. */
   readonly title: string
   /** Members at the time the menu opened. */
-  readonly members: readonly WorkspaceLink[]
+  readonly members: readonly WorkspaceMemberInfo[]
 }
 
 /** Current request; module state because the menu action raises it outside React. */

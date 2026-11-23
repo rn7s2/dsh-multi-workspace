@@ -104,6 +104,25 @@ export function isDerivedTitle(title: string, paths: readonly string[]): boolean
 }
 
 /**
+ * Whether a title is one this plugin derived, including the ` (2)` collision
+ * suffix {@link uniqueTitle} may have added. Without this, a suffixed automatic
+ * title would be mistaken for one the operator chose and stop updating.
+ * @param title - stored Workspace title.
+ * @param paths - current member folders.
+ * @returns true when the title is automatic and may be recomputed.
+ */
+export function isAutoTitle(title: string, paths: readonly string[]): boolean {
+  if (isDerivedTitle(title, paths)) return true
+  if (paths.length === 0) return false
+  const derived = deriveTitleFromPaths(paths)
+  return (
+    title.length > derived.length
+    && title.startsWith(`${derived} (`)
+    && /^\(\d+\)$/.test(title.slice(derived.length + 1))
+  )
+}
+
+/**
  * Make an automatic title unique among the Workspace titles already in use.
  * Different folders may share base names, and shared titles make the sidebar
  * ambiguous, so later duplicates get a ` (2)`, ` (3)`, ... suffix.

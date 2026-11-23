@@ -110,6 +110,64 @@ describe('MultiFolderDialog append variant', () => {
     expect(screen.getByRole('button', { name: 'Add' })).toBeTruthy()
   })
 
+  it('matches a member through the canonical spelling of a browsed entry', async () => {
+    const canonical: DirectoryListing = {
+      ...listing,
+      entries: [
+        { name: 'alpha', path: '/var/tmp/alpha', real: '/tmp/alpha', hidden: false },
+        { name: 'beta', path: '/tmp/beta', hidden: false },
+      ],
+    }
+    renderDialog({
+      list: async () => canonical,
+      overrides: { exclude: ['/tmp/alpha'], confirm: 'Add' },
+    })
+
+    const alpha = (await screen.findByRole('checkbox', { name: 'alpha' })) as HTMLInputElement
+    expect(alpha.disabled).toBe(true)
+    const beta = screen.getByRole('checkbox', { name: 'beta' }) as HTMLInputElement
+    expect(beta.disabled).toBe(false)
+  })
+
+  it('shows the pending label while submitting and an error without dropping the selection', async () => {
+    let release: (() => void) | undefined
+    const onConfirm = vi.fn(
+      () => new Promise<void>(resolve => {
+        release = resolve
+      }),
+    )
+    const view = render(
+      <MultiFolderDialog
+        list={async () => listing}
+        t={key => key}
+        busy={false}
+        onConfirm={onConfirm}
+        onCancel={() => undefined}
+        overrides={{ confirm: 'Add', pending: 'Adding…', error: null }}
+      />,
+    )
+    await screen.findByRole('checkbox', { name: 'alpha' })
+    fireEvent.click(screen.getByRole('checkbox', { name: 'alpha' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Adding…' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Adding…' }))
+
+    view.rerender(
+      <MultiFolderDialog
+        list={async () => listing}
+        t={key => key}
+        busy={false}
+        onConfirm={onConfirm}
+        onCancel={() => undefined}
+        overrides={{ confirm: 'Add', pending: 'Adding…', error: 'folder is outside the workspace' }}
+      />,
+    )
+    expect(await screen.findByText('folder is outside the workspace')).toBeTruthy()
+    const alpha = screen.getByRole('checkbox', { name: 'alpha' }) as HTMLInputElement
+    expect(alpha.checked).toBe(true)
+    release?.()
+  })
+
   it('disables and marks the folders that already belong to the workspace', async () => {
     const { onConfirm } = renderDialog({
       overrides: { exclude: ['/tmp/alpha'], confirm: 'Add' },

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -59,11 +59,19 @@ describe('buildDirectoryListing', () => {
 
     const listing = await buildDirectoryListing(level, { home: resolve(base) })
     expect(listing.path).toBe(resolve(level))
-    expect(listing.entries).toEqual([
+    expect(listing.entries.map(entry => ({
+      name: entry.name,
+      path: entry.path,
+      hidden: entry.hidden,
+    }))).toEqual([
       { name: '.hidden', path: join(resolve(level), '.hidden'), hidden: true },
       { name: 'Alpha', path: join(resolve(level), 'Alpha'), hidden: false },
       { name: 'beta', path: join(resolve(level), 'beta'), hidden: false },
     ])
+    // Every row carries the canonical spelling a member is recorded under.
+    for (const entry of listing.entries) {
+      expect(entry.real).toBe(await realpath(entry.path))
+    }
     expect(listing.truncated).toBe(false)
   })
 

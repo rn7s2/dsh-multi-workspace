@@ -13,7 +13,7 @@
  *
  * @module dsh-multi-workspace/host/listing
  */
-import { readdir, stat } from 'node:fs/promises'
+import { readdir, realpath, stat } from 'node:fs/promises'
 import type { Dirent } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -130,7 +130,8 @@ export async function buildDirectoryListing(
   for (const dirent of dirents) {
     if (!(await isDirectoryEntry(target, dirent))) continue
     const path = join(target, dirent.name)
-    entries.push({ name: dirent.name, path, hidden: dirent.name.startsWith('.') })
+    const real = await realpath(path).catch(() => path)
+    entries.push({ name: dirent.name, path, hidden: dirent.name.startsWith('.'), real })
   }
   entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
   const truncated = entries.length > limit

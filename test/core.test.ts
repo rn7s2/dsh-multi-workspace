@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { SelectionError, buildPlan, planAddition, planRemoval } from '../src/host/core.js'
 import type { SelectionErrorCode } from '../src/host/core.js'
-import { isDerivedTitle, uniqueTitle } from '../src/shared/naming.js'
+import { isAutoTitle, isDerivedTitle, uniqueTitle } from '../src/shared/naming.js'
 
 describe('buildPlan titles', () => {
   it('uses the single folder name unchanged', () => {
@@ -162,6 +162,19 @@ describe('title helpers', () => {
     expect(isDerivedTitle('alpha and beta', ['/a/alpha', '/b/beta'])).toBe(true)
     expect(isDerivedTitle('My Workspace', ['/a/alpha', '/b/beta'])).toBe(false)
     expect(isDerivedTitle('anything', [])).toBe(false)
+  })
+
+  it('treats a suffixed automatic title as automatic', () => {
+    expect(isAutoTitle('alpha and beta', ['/a/alpha', '/b/beta'])).toBe(true)
+    expect(isAutoTitle('alpha and beta (2)', ['/a/alpha', '/b/beta'])).toBe(true)
+    expect(isAutoTitle('alpha and beta (17)', ['/a/alpha', '/b/beta'])).toBe(true)
+  })
+
+  it('treats anything an operator typed as manual', () => {
+    expect(isAutoTitle('My Workspace', ['/a/alpha', '/b/beta'])).toBe(false)
+    expect(isAutoTitle('alpha and beta (two)', ['/a/alpha', '/b/beta'])).toBe(false)
+    expect(isAutoTitle('alpha and beta (2)', [])).toBe(false)
+    expect(isAutoTitle('alpha and beta extra', ['/a/alpha', '/b/beta'])).toBe(false)
   })
 
   it('leaves a free title alone', () => {

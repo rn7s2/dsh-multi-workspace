@@ -15,6 +15,13 @@ export interface DirectoryEntry {
   path: string
   /** Hidden by the host convention (dot-prefixed on POSIX); the Client decides whether to show it. */
   hidden: boolean
+  /**
+   * Canonical spelling after following symlinks. Members are recorded
+   * canonically, so this is the value to compare them against; it differs from
+   * {@link DirectoryEntry.path} when the browsed spelling goes through a link
+   * (`/var` vs `/private/var`, a linked home directory, and so on).
+   */
+  real?: string
 }
 
 /** One directory level plus its ancestry, as the Host returns it. */

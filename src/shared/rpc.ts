@@ -102,6 +102,12 @@ export interface WorkspaceInspectRequest {
   path: string
 }
 
+/** One member as reported to the menu and the removal dialog. */
+export interface WorkspaceMemberInfo extends WorkspaceLink {
+  /** True when a live session's working directory sits inside this folder. */
+  inUse?: boolean
+}
+
 /** Description of one combined workspace. */
 export interface WorkspaceInfo {
   /** Absolute path of the real combined workspace directory. */
@@ -111,7 +117,7 @@ export interface WorkspaceInfo {
   /** Whether the title is still derived from the current folders. */
   titleAuto: boolean
   /** Symlinks in the directory, in the order they were added. */
-  members: WorkspaceLink[]
+  members: WorkspaceMemberInfo[]
   /** Durable Workspace id, when the directory is currently registered. */
   workspaceId?: string
 }
@@ -178,7 +184,7 @@ export const workspaceInfoSchema = z.object({
   path: z.string().min(1),
   title: z.string().min(1),
   titleAuto: z.boolean(),
-  members: z.array(zLink),
+  members: z.array(zLink.extend({ inUse: z.boolean().optional() })),
   workspaceId: z.string().min(1).optional(),
 })
 
