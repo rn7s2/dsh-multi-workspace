@@ -20,10 +20,14 @@ import { RemoteCallError } from './errors.js'
 import { MultiWorkspaceFlow } from './flow.js'
 import type { FlowInjected } from './flow.js'
 import type { DirectoryListing } from '../shared/listing.js'
-import type { WorkspaceCreateRequest, WorkspaceCreateResult } from '../shared/rpc.js'
+import { MIN_MEMBERS, type WorkspaceCreateRequest, type WorkspaceCreateResult, type WorkspaceInfo, type WorkspaceUpdateResult } from '../shared/rpc.js'
+import { HARD_MAX_PATHS } from '../shared/naming.js'
+import { FoldersSurface } from './manage.js'
+import type { FoldersSurfaceInjected } from './manage.js'
+import { openFoldersRequest } from './requests.js'
 
 /** Required Client services. */
-export const inject = ['slots', 'locale', 'remote']
+export const inject = ['slots', 'locale', 'remote', 'contextMenus']
 
 /** One `RemoteResult` branch of a generated Client Remote call. */
 type RemoteResult<T> =
@@ -35,6 +39,32 @@ interface MultiWorkspaceRemoteNamespace {
   pick(message: string): Promise<RemoteResult<string[] | null>>
   list(path: string | null): Promise<RemoteResult<DirectoryListing>>
   create(request: WorkspaceCreateRequest): Promise<RemoteResult<WorkspaceCreateResult>>
+  inspect(request: { path: string }): Promise<RemoteResult<WorkspaceInfo | null>>
+  addFolders(request: { path: string; paths: string[] }): Promise<RemoteResult<WorkspaceUpdateResult>>
+  removeFolders(request: { path: string; names: string[] }): Promise<RemoteResult<WorkspaceUpdateResult>>
+}
+
+/** One row a feature contributes to a context menu for a captured target. */
+interface MenuActionLike {
+  id: string
+  label: string
+  disabled?: boolean
+  danger?: boolean
+  separatorBefore?: boolean
+  run?: () => void | Promise<void>
+}
+
+/** The minimal context-menu service face this plugin registers into. */
+interface ContextMenusLike {
+  register(contribution: {
+    id: string
+    target: 'workspace'
+    order: number
+    resolve: (
+      target: { workspaceId: string; path: string; displayTitle: string },
+      signal: AbortSignal,
+    ) => readonly MenuActionLike[] | Promise<readonly MenuActionLike[]>
+  }): () => void
 }
 
 /** The Client `remote` service face this plugin uses. */
@@ -49,13 +79,25 @@ type Translate = (key: string, params?: Record<string, string | number>) => stri
 interface ClientContext {
   slots: {
     inject(key: string, callback: () => unknown): () => void
-    register(options: { name: string; inject?: () => object }, component: (props: never) => React.ReactElement | null): unknown
+    register(
+      options: {
+        name: string
+        id?: string
+        key?: string
+        order?: number
+        label?: string
+        locale?: string
+        inject?: () => object
+      },
+      component: (props: never) => React.ReactElement | null,
+    ): unknown
   }
   locale: {
     register(namespace: string, locale: string, dictionary: Record<string, string>): () => void
     bind(namespace: string): Translate
   }
   remote: ClientRemoteService
+  contextMenus: ContextMenusLike
   /** Read a service without declaring it in `inject` (used for the mounted namespace). */
   get(name: string): unknown
   effect(callback: () => (() => void) | void, label?: string): () => void
@@ -118,12 +160,30 @@ export async function apply(context: unknown): Promise<() => Promise<void>> {
   const createCombined = (paths: readonly string[]): Promise<WorkspaceCreateResult> =>
     unwrap(() => namespace().create({ paths: [...paths] }))
 
+  const inspect = (path: string): Promise<WorkspaceInfo | null> =>
+    unwrap(() => namespace().inspect({ path }))
+
+  const addFolders = (path: string, paths: readonly string[]): Promise<WorkspaceUpdateResult> =>
+    unwrap(() => namespace().addFolders({ path, paths: [...paths] }))
+
+  const removeFolders = (path: string, names: readonly string[]): Promise<WorkspaceUpdateResult> =>
+    unwrap(() => namespace().removeFolders({ path, names: [...names] }))
+
   const injected = (): FlowInjected => ({
     pick,
     list,
     createCombined,
     message,
     t: translate,
+  })
+
+  const surfaceInjected = (): FoldersSurfaceInjected => ({
+    t: translate,
+    message: translate('manage.pickMessage'),
+    pick,
+    list,
+    addFolders,
+    removeFolders,
   })
 
   const disposeSlots = ctx.effect(
@@ -143,7 +203,69 @@ export async function apply(context: unknown): Promise<() => Promise<void>> {
     'multi-workspace: directory-flow occupants',
   )
 
+  // Workspace menu rows: both are additive data contributions, so the shipped
+  // Rename / Delete rows stay exactly where they are.
+  const disposeMenu = ctx.effect(
+    () =>
+      ctx.contextMenus.register({
+        id: 'multi-workspace.folders',
+        target: 'workspace',
+        order: 120,
+        resolve: async target => {
+          let info: WorkspaceInfo | null
+          try {
+            info = await inspect(target.path)
+          } catch {
+            // An ordinary workspace has no manifest: no rows, no noise.
+            return []
+          }
+          if (info === null) return []
+          const rows: MenuActionLike[] = []
+          if (info.members.length < HARD_MAX_PATHS) {
+            rows.push({
+              id: 'add-folders',
+              label: translate('menu.add'),
+              run: () => {
+                openFoldersRequest({ kind: 'add', path: info.path, title: info.title, members: info.members })
+              },
+            })
+          }
+          if (info.members.length > MIN_MEMBERS) {
+            rows.push({
+              id: 'remove-folders',
+              label: translate('menu.remove'),
+              run: () => {
+                openFoldersRequest({
+                  kind: 'remove',
+                  path: info.path,
+                  title: info.title,
+                  members: info.members,
+                })
+              },
+            })
+          }
+          return rows
+        },
+      }),
+    'multi-workspace: workspace menu rows',
+  )
+
+  // The surfaces those rows raise live in the frame-wide layer so they outlive
+  // the menu that opened them.
+  const disposeSurface = ctx.effect(
+    () =>
+      ctx.slots.inject('shell.overlay', () =>
+        ctx.slots.register(
+          { name: 'shell.overlay', id: 'multi-workspace.folders', inject: surfaceInjected },
+          FoldersSurface as (props: never) => React.ReactElement | null,
+        ),
+      ),
+    'multi-workspace: folders surface',
+  )
+
   return async () => {
+    disposeSurface()
+    disposeMenu()
     disposeSlots()
     disposeLocale()
     await disposeRemote()

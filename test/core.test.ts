@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { SelectionError, buildPlan, uniqueDirectoryName } from '../src/host/core.js'
+import { SelectionError, buildPlan, planAddition, planRemoval } from '../src/host/core.js'
 import type { SelectionErrorCode } from '../src/host/core.js'
-import { MAX_SLUG_LENGTH, slugify } from '../src/shared/naming.js'
+import { isDerivedTitle, uniqueTitle } from '../src/shared/naming.js'
 
 describe('buildPlan titles', () => {
   it('uses the single folder name unchanged', () => {
@@ -20,23 +20,15 @@ describe('buildPlan titles', () => {
     expect(buildPlan(['/a/A', '/b/B', '/c/C', '/d/D', '/e/E']).title).toBe('A, B, C, D and E')
   })
 
-  it('keeps CJK folder names in the title and falls back to a workspace slug', () => {
+  it('keeps CJK folder names in the title', () => {
     const plan = buildPlan(['/example/项目一', '/example/项目二'])
     expect(plan.title).toBe('项目一 and 项目二')
-    expect(plan.slug).toBe('workspace')
-    expect(buildPlan(['/example/项目一'], { title: '纯中文标题' }).slug).toBe('workspace')
+    expect(plan.titleAuto).toBe(true)
   })
 
-  it('builds the auto slug from folder names, never from the join connectives', () => {
-    expect(buildPlan(['/a/alpha', '/b/beta', '/c/gamma']).slug).toBe('alpha-beta-gamma')
-    expect(buildPlan(['/a/alpha', '/b/beta']).slug).toBe('alpha-beta')
-    expect(buildPlan(['/a/one']).slug).toBe('one')
-  })
-
-  it('keeps spaces in the title and slugifies them', () => {
+  it('keeps spaces in the title', () => {
     const plan = buildPlan(['/example/My Folder'])
     expect(plan.title).toBe('My Folder')
-    expect(plan.slug).toBe('my-folder')
   })
 
   it('preserves selection order for titles, sources, and links', () => {
@@ -78,61 +70,107 @@ describe('buildPlan link names', () => {
   })
 })
 
-describe('buildPlan title override and slug', () => {
-  it('prefers a trimmed explicit title', () => {
+describe('buildPlan title override', () => {
+  it('prefers a trimmed explicit title and marks it manual', () => {
     const plan = buildPlan(['/a/one', '/b/two'], { title: '  Custom Name  ' })
     expect(plan.title).toBe('Custom Name')
-    expect(plan.slug).toBe('custom-name')
+    expect(plan.titleAuto).toBe(false)
     expect(plan.links.map(link => link.name)).toEqual(['one', 'two'])
   })
 
   it('falls back to the derived title when the override is blank', () => {
-    expect(buildPlan(['/a/one', '/b/two'], { title: '   ' }).title).toBe('one and two')
-    expect(buildPlan(['/a/one'], { title: '' }).title).toBe('one')
-  })
-
-  it('matches the shared slugify rules for punctuation and casing', () => {
-    const title = 'Release  Notes -- October 2026!!'
-    const plan = buildPlan(['/a/one'], { title })
-    expect(plan.slug).toBe(slugify(title))
-    expect(plan.slug).toBe('release-notes-october-2026')
-  })
-
-  it('drops non-ASCII characters from a mixed title', () => {
-    expect(buildPlan(['/a/one'], { title: '项目 Plan' }).slug).toBe('plan')
-  })
-
-  it('caps the slug at MAX_SLUG_LENGTH characters', () => {
-    const plan = buildPlan(['/a/one'], { title: 'x'.repeat(MAX_SLUG_LENGTH + 20) })
-    expect(plan.slug).toBe('x'.repeat(MAX_SLUG_LENGTH))
-    expect(plan.slug.length).toBe(MAX_SLUG_LENGTH)
+    expect(buildPlan(['/a/one', '/b/two'], { title: '   ' })).toMatchObject({
+      title: 'one and two',
+      titleAuto: true,
+    })
+    expect(buildPlan(['/a/one'], { title: '' })).toMatchObject({ title: 'one', titleAuto: true })
   })
 })
 
-describe('uniqueDirectoryName', () => {
-  it('returns the slug when it is free', () => {
-    expect(uniqueDirectoryName('demo', () => false)).toBe('demo')
+describe('planAddition', () => {
+  const existing = [
+    { name: 'alpha', target: '/src/alpha' },
+    { name: 'docs', target: '/src/first/docs' },
+  ]
+
+  it('appends new links in the order given', () => {
+    const added = planAddition(existing, ['/src/beta', '/src/gamma'])
+    expect(added).toEqual([
+      { name: 'beta', target: '/src/beta' },
+      { name: 'gamma', target: '/src/gamma' },
+    ])
   })
 
-  it('tries numbered suffixes in order and stops at the first free one', () => {
-    const taken = new Set(['demo', 'demo-2', 'demo-3'])
-    const probes: string[] = []
-    const name = uniqueDirectoryName('demo', candidate => {
-      probes.push(candidate)
-      return taken.has(candidate)
-    })
-    expect(name).toBe('demo-4')
-    expect(probes).toEqual(['demo', 'demo-2', 'demo-3', 'demo-4'])
+  it('avoids names already used by the directory', () => {
+    const added = planAddition(existing, ['/src/second/docs'])
+    expect(added).toEqual([{ name: 'docs-2', target: '/src/second/docs' }])
   })
 
-  it('falls back to a timestamped name when 2..999 are taken', () => {
-    const taken = new Set(['demo'])
-    for (let suffix = 2; suffix <= 999; suffix += 1) taken.add(`demo-${suffix}`)
-    const name = uniqueDirectoryName('demo', candidate => taken.has(candidate))
-    expect(name).toMatch(/^demo-\d+$/)
-    expect(taken.has(name)).toBe(false)
-    const timestamp = Number(name.slice('demo-'.length))
-    expect(Math.abs(timestamp - Date.now())).toBeLessThan(5_000)
+  it('keeps the new batch unique against itself as well', () => {
+    const added = planAddition(existing, ['/a/docs', '/b/docs', '/c/DOCS'])
+    expect(added.map(link => link.name)).toEqual(['docs-2', 'docs-3', 'DOCS-4'])
+  })
+
+  it('does not mutate the existing links', () => {
+    planAddition(existing, ['/src/beta'])
+    expect(existing.map(link => link.name)).toEqual(['alpha', 'docs'])
+  })
+})
+
+describe('planRemoval', () => {
+  const existing = [
+    { name: 'alpha', target: '/src/alpha' },
+    { name: 'beta', target: '/src/beta' },
+    { name: 'gamma', target: '/src/gamma' },
+  ]
+
+  it('splits the members into survivors and removals, keeping order', () => {
+    const plan = planRemoval(existing, ['beta'], 2)
+    expect(plan.remaining.map(link => link.name)).toEqual(['alpha', 'gamma'])
+    expect(plan.removed.map(link => link.name)).toEqual(['beta'])
+  })
+
+  it('accepts removing several members at once', () => {
+    const plan = planRemoval(existing, ['alpha', 'gamma'], 1)
+    expect(plan.remaining.map(link => link.name)).toEqual(['beta'])
+    expect(plan.removed.map(link => link.name)).toEqual(['alpha', 'gamma'])
+  })
+
+  it('refuses to go below the member floor', () => {
+    expect(() => planRemoval(existing, ['beta', 'gamma'], 2)).toThrow(SelectionError)
+    try {
+      planRemoval(existing, ['beta', 'gamma'], 2)
+    } catch (error) {
+      expect((error as SelectionError).code).toBe('too-few-members')
+      expect((error as SelectionError).message).toContain('at least 2')
+    }
+  })
+
+  it('rejects an unknown member name', () => {
+    try {
+      planRemoval(existing, ['delta'], 2)
+    } catch (error) {
+      expect((error as SelectionError).code).toBe('member-unknown')
+      expect((error as SelectionError).message).toContain('delta')
+    }
+    expect(() => planRemoval(existing, ['delta'], 2)).toThrow(SelectionError)
+  })
+})
+
+describe('title helpers', () => {
+  it('recognizes a title that is still derived from the folders', () => {
+    expect(isDerivedTitle('alpha and beta', ['/a/alpha', '/b/beta'])).toBe(true)
+    expect(isDerivedTitle('My Workspace', ['/a/alpha', '/b/beta'])).toBe(false)
+    expect(isDerivedTitle('anything', [])).toBe(false)
+  })
+
+  it('leaves a free title alone', () => {
+    expect(uniqueTitle('alpha and beta', ['other'])).toBe('alpha and beta')
+  })
+
+  it('suffixes a title another workspace already uses', () => {
+    expect(uniqueTitle('docs and docs', ['docs and docs'])).toBe('docs and docs (2)')
+    expect(uniqueTitle('docs and docs', ['docs and docs', 'docs and docs (2)'])).toBe('docs and docs (3)')
   })
 })
 
@@ -165,6 +203,10 @@ describe('SelectionError', () => {
       'inside-workspace-root',
       'root-unavailable',
       'materialize-failed',
+      'not-combined',
+      'member-unknown',
+      'too-few-members',
+      'last-member',
     ]
     for (const code of codes) {
       expect(new SelectionError(code, 'message').code).toBe(code)

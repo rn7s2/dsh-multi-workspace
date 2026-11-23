@@ -29,10 +29,24 @@ export interface MultiFolderDialogProps {
   onConfirm: (paths: readonly string[]) => Promise<void>
   /** Dismiss without picking. */
   onCancel: () => void
+  /** Copy and behaviour overrides for the append-to-workspace variant. */
+  overrides?: MultiFolderDialogOverrides
+}
+
+/** Overrides that turn the browser from "create a workspace" into "append folders". */
+export interface MultiFolderDialogOverrides {
+  /** Panel heading; defaults to the create copy. */
+  title?: string
+  /** One-line explanation under the heading. */
+  subtitle?: string
+  /** Confirm button label; defaults to the create/open copy. */
+  confirm?: string
+  /** Absolute paths already inside the workspace; their rows are shown disabled. */
+  exclude?: readonly string[]
 }
 
 /** Inline styles; theme tokens keep light and dark modes coherent. */
-const styles = {
+export const panelStyles = {
   overlay: {
     position: 'fixed',
     inset: 0,
@@ -252,7 +266,8 @@ const styles = {
  * @returns the dialog element, or null when no document is available.
  */
 export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactElement | null {
-  const { list, t, busy, onConfirm, onCancel } = props
+  const { list, t, busy, onConfirm, onCancel, overrides } = props
+  const excluded = React.useMemo(() => new Set(overrides?.exclude ?? []), [overrides])
   const [listing, setListing] = React.useState<DirectoryListing | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
@@ -309,7 +324,7 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
   )
 
   const toggle = (entry: DirectoryEntry): void => {
-    if (disabled) return
+    if (disabled || excluded.has(entry.path)) return
     setSelected(current => toggleSelection(current, entry))
   }
 
@@ -330,9 +345,11 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
   if (typeof document === 'undefined') return null
   const confirmLabel = submitting
     ? t('dialog.creating')
-    : selected.length === 1
-      ? t('dialog.open')
-      : t('dialog.create')
+    : overrides?.confirm !== undefined
+      ? overrides.confirm
+      : selected.length === 1
+        ? t('dialog.open')
+        : t('dialog.create')
   const crumbButtons =
     listing === null
       ? []
@@ -340,7 +357,7 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
 
   return createPortal(
     <div
-      style={styles.overlay}
+      style={panelStyles.overlay}
       onMouseDown={event => {
         if (event.target === event.currentTarget && !disabled) onCancel()
       }}
@@ -351,20 +368,20 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        style={styles.panel}
+        style={panelStyles.panel}
         onMouseDown={event => event.stopPropagation()}
       >
-        <div style={styles.header}>
-          <h2 id={titleId} style={styles.title}>
-            {t('dialog.title')}
+        <div style={panelStyles.header}>
+          <h2 id={titleId} style={panelStyles.title}>
+            {overrides?.title ?? t('dialog.title')}
           </h2>
-          <p style={styles.subtitle}>{t('dialog.subtitle')}</p>
+          <p style={panelStyles.subtitle}>{overrides?.subtitle ?? t('dialog.subtitle')}</p>
         </div>
 
-        <div style={styles.breadcrumb}>
+        <div style={panelStyles.breadcrumb}>
           <button
             type="button"
-            style={styles.crumb}
+            style={panelStyles.crumb}
             disabled={disabled}
             onClick={() => void load(listing?.home)}
           >
@@ -372,10 +389,10 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
           </button>
           {crumbButtons.map(crumb => (
             <React.Fragment key={crumb.path}>
-              <span style={styles.separator}>/</span>
+              <span style={panelStyles.separator}>/</span>
               <button
                 type="button"
-                style={styles.crumb}
+                style={panelStyles.crumb}
                 disabled={disabled}
                 title={crumb.path}
                 onClick={() => void load(crumb.path)}
@@ -386,11 +403,11 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
           ))}
         </div>
 
-        <div style={styles.controls}>
-          <label style={styles.hiddenToggle}>
+        <div style={panelStyles.controls}>
+          <label style={panelStyles.hiddenToggle}>
             <input
               type="checkbox"
-              style={styles.checkbox}
+              style={panelStyles.checkbox}
               checked={showHidden}
               disabled={disabled}
               onChange={event => setShowHidden(event.currentTarget.checked)}
@@ -399,7 +416,7 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
           </label>
           <button
             type="button"
-            style={styles.refresh}
+            style={panelStyles.refresh}
             disabled={disabled || loading}
             onClick={() => void load(listing?.path)}
           >
@@ -407,54 +424,58 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
           </button>
         </div>
 
-        <div style={styles.list}>
-          {loading ? <div style={styles.status}>{t('dialog.loading')}</div> : null}
+        <div style={panelStyles.list}>
+          {loading ? <div style={panelStyles.status}>{t('dialog.loading')}</div> : null}
           {error !== null ? (
-            <div role="alert" style={styles.error}>
+            <div role="alert" style={panelStyles.error}>
               {error}
             </div>
           ) : null}
           {!loading && error === null && visible.length === 0 ? (
-            <div style={styles.status}>{t('dialog.empty')}</div>
+            <div style={panelStyles.status}>{t('dialog.empty')}</div>
           ) : null}
           {!loading && error === null
             ? visible.map(entry => (
-                <div key={entry.path} style={styles.row}>
+                <div key={entry.path} style={panelStyles.row}>
                   <input
                     type="checkbox"
-                    style={styles.checkbox}
-                    checked={selectionHas(selected, entry.path)}
-                    disabled={disabled}
+                    style={panelStyles.checkbox}
+                    checked={selectionHas(selected, entry.path) || excluded.has(entry.path)}
+                    disabled={disabled || excluded.has(entry.path)}
                     aria-label={entry.name}
                     onChange={() => toggle(entry)}
                   />
                   <button
                     type="button"
-                    style={styles.name}
+                    style={panelStyles.name}
                     disabled={disabled}
                     title={entry.path}
                     onClick={() => void load(entry.path)}
                   >
                     {entry.name}
                   </button>
-                  {entry.hidden ? <span style={styles.hiddenNote}>{t('dialog.hiddenTag')}</span> : null}
+                  {excluded.has(entry.path) ? (
+                    <span style={panelStyles.hiddenNote}>{t('dialog.alreadyMember')}</span>
+                  ) : entry.hidden ? (
+                    <span style={panelStyles.hiddenNote}>{t('dialog.hiddenTag')}</span>
+                  ) : null}
                 </div>
               ))
             : null}
           {!loading && listing?.truncated === true ? (
-            <div style={styles.status}>{t('dialog.truncated')}</div>
+            <div style={panelStyles.status}>{t('dialog.truncated')}</div>
           ) : null}
         </div>
 
         {selected.length > 0 ? (
-          <div style={styles.selected}>
-            <span style={styles.selectedLabel}>{t('dialog.selected', { count: selected.length })}</span>
+          <div style={panelStyles.selected}>
+            <span style={panelStyles.selectedLabel}>{t('dialog.selected', { count: selected.length })}</span>
             {selected.map(entry => (
-              <span key={entry.path} style={styles.chip} title={entry.path}>
-                <span style={styles.chipName}>{entry.name}</span>
+              <span key={entry.path} style={panelStyles.chip} title={entry.path}>
+                <span style={panelStyles.chipName}>{entry.name}</span>
                 <button
                   type="button"
-                  style={styles.chipRemove}
+                  style={panelStyles.chipRemove}
                   disabled={disabled}
                   aria-label={t('dialog.remove', { name: entry.name })}
                   onClick={() => setSelected(current => removeSelection(current, entry.path))}
@@ -464,18 +485,18 @@ export function MultiFolderDialog(props: MultiFolderDialogProps): React.ReactEle
               </span>
             ))}
             {selected.length >= HARD_MAX_PATHS ? (
-              <span style={styles.capNote}>{t('dialog.max')}</span>
+              <span style={panelStyles.capNote}>{t('dialog.max')}</span>
             ) : null}
           </div>
         ) : null}
 
-        <div style={styles.footer}>
-          <button type="button" style={styles.button} disabled={disabled} onClick={onCancel}>
+        <div style={panelStyles.footer}>
+          <button type="button" style={panelStyles.button} disabled={disabled} onClick={onCancel}>
             {t('dialog.cancel')}
           </button>
           <button
             type="button"
-            style={{ ...styles.primary, ...(disabled || selected.length === 0 ? styles.disabled : {}) }}
+            style={{ ...panelStyles.primary, ...(disabled || selected.length === 0 ? panelStyles.disabled : {}) }}
             disabled={disabled || selected.length === 0}
             onClick={() => void confirm()}
           >

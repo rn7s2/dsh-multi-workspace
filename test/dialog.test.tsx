@@ -97,3 +97,31 @@ describe('MultiFolderDialog', () => {
     expect(onCancel).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('MultiFolderDialog append variant', () => {
+  it('uses the override copy and the override confirm label', async () => {
+    renderDialog({
+      overrides: { title: 'Add folders', subtitle: 'links only', confirm: 'Add' },
+    })
+
+    expect(await screen.findByText('Add folders')).toBeTruthy()
+    expect(screen.getByText('links only')).toBeTruthy()
+    await screen.findByRole('checkbox', { name: 'alpha' })
+    expect(screen.getByRole('button', { name: 'Add' })).toBeTruthy()
+  })
+
+  it('disables and marks the folders that already belong to the workspace', async () => {
+    const { onConfirm } = renderDialog({
+      overrides: { exclude: ['/tmp/alpha'], confirm: 'Add' },
+    })
+
+    const alpha = (await screen.findByRole('checkbox', { name: 'alpha' })) as HTMLInputElement
+    expect(alpha.disabled).toBe(true)
+    expect(alpha.checked).toBe(true)
+    expect(screen.getByText('dialog.alreadyMember')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'beta' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith(['/tmp/beta']))
+  })
+})

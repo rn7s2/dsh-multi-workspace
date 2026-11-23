@@ -50,8 +50,31 @@ describe('Host Typert manifest', () => {
     ).toBe(true)
   })
 
-  it('lists the new method in the model service members', () => {
+  it('registers the inspect, add and remove invocations', () => {
+    for (const method of ['inspect', 'addFolders', 'removeFolders']) {
+      const invocation = invocations.find(
+        entry => entry.namespace === 'multiWorkspace' && entry.method === method,
+      )
+      expect(invocation, method).toBeDefined()
+      expect(invocation?.parameters[0]?.name).toBe('request')
+      expect(invocation?.result.jsonSchema).toBeDefined()
+    }
+  })
+
+  it('describes inspect as nullable', () => {
+    const inspect = invocations.find(
+      entry => entry.namespace === 'multiWorkspace' && entry.method === 'inspect',
+    )
+    expect(inspect?.result.jsonSchema).toMatchObject({
+      oneOf: [{ type: 'null' }, { type: 'object' }],
+    })
+  })
+
+  it('lists every method in the model service members', () => {
     const members = TYPERT.model.services[0]?.members as unknown as ModelMember[]
-    expect(members.some(member => member.name === 'list')).toBe(true)
+    const names = members.map(member => member.name)
+    expect(names).toEqual(
+      expect.arrayContaining(['list', 'pick', 'create', 'inspect', 'addFolders', 'removeFolders']),
+    )
   })
 })
