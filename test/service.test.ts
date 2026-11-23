@@ -271,33 +271,35 @@ describe('multiWorkspace service edits', () => {
   })
 })
 
-describe('combined-workspace cleanup', () => {
-  /**
-   * Apply the plugin over a context that records the domain listener.
-   * @param rootDir - combined-workspace root.
-   * @param registry - registry stub.
-   */
-  function applyPlugin(
-    rootDir: string,
-    registry: ReturnType<typeof makeRegistry>['registry'],
-  ): (change: Record<string, unknown>) => void {
-    const services = new Map<string, unknown>([['workspaceRegistry', registry]])
-    let listener: ((change: Record<string, unknown>) => void) | undefined
-    const ctx = {
-      get: (name: string) => services.get(name),
-      provide: () => () => undefined,
-      inject: () => undefined,
-      on: (_event: string, callback: (change: Record<string, unknown>) => void) => {
-        listener = callback
-        return () => undefined
-      },
-    }
-    applyHost(ctx as never, { rootDir })
-    return change => {
-      if (listener === undefined) throw new Error('the plugin did not subscribe to the domain')
-      listener(change)
-    }
+/**
+ * Apply the plugin over a context that records the domain listener.
+ * @param rootDir - combined-workspace root.
+ * @param registry - registry stub.
+ * @returns a caller that delivers one domain change to the plugin.
+ */
+function applyPlugin(
+  rootDir: string,
+  registry: ReturnType<typeof makeRegistry>['registry'],
+): (change: Record<string, unknown>) => void {
+  const services = new Map<string, unknown>([['workspaceRegistry', registry]])
+  let listener: ((change: Record<string, unknown>) => void) | undefined
+  const ctx = {
+    get: (name: string) => services.get(name),
+    provide: () => () => undefined,
+    inject: () => undefined,
+    on: (_event: string, callback: (change: Record<string, unknown>) => void) => {
+      listener = callback
+      return () => undefined
+    },
   }
+  applyHost(ctx as never, { rootDir })
+  return change => {
+    if (listener === undefined) throw new Error('the plugin did not subscribe to the domain')
+    listener(change)
+  }
+}
+
+describe('combined-workspace cleanup', () => {
 
   it('drops the directory of a workspace that never owned a session', async () => {
     const rootDir = join(base, 'workspaces')
@@ -438,8 +440,26 @@ describe('review fixes: inspection scope and session awareness', () => {
     }
     expect(manifest).toMatchObject({ title: 'alpha and beta', titleAuto: true })
 
-    // A stale echo of the published-failed title is ignored, so the next edit
-    // still recomputes from the folders.
+    // Every later registry write carries the same stale title — a session
+    // attaching, say. None of them may turn it into a manual choice.
+    const fire = applyPlugin(rootDir, registry)
+    for (let round = 0; round < 3; round += 1) {
+      fire({
+        domain: 'workspace',
+        table: 'workspaces',
+        key: records[0]?.id,
+        operation: 'put',
+        value: { ...records[0], sessionIds: [`session-${round}`] },
+      })
+      await new Promise(resolveWait => setTimeout(resolveWait, 30))
+    }
+    const echoed = JSON.parse(await readFile(join(created.path, MANIFEST_FILE), 'utf8')) as {
+      title: string
+      titleAuto: boolean
+    }
+    expect(echoed).toMatchObject({ title: 'alpha and beta', titleAuto: true })
+
+    // So the next edit still recomputes the title from the folders.
     await mkdir(join(base, 'delta'), { recursive: true })
     if (record !== undefined) record.setTitle = async next => { record.title = next }
     const again = await service.addFolders({ path: created.path, paths: [join(base, 'delta')] })
