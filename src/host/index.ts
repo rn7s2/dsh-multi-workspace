@@ -18,12 +18,10 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { SelectionError } from './core.js'
 import {
   addFolders,
-  clearStaleTitle,
   dissolveWorkspaceDirectory,
   materializeWorkspace,
   readCombinedWorkspaceWithin,
   removeFolders,
-  suppressStaleTitle,
   syncWorkspaceTitle,
 } from './fs.js'
 import type { EditedWorkspace, MaterializedWorkspace } from './fs.js'
@@ -312,7 +310,6 @@ async function applyEdit(
   if (owner !== undefined && typeof owner.setTitle === 'function' && owner.title !== edited.title) {
     try {
       await owner.setTitle(edited.title)
-      await clearStaleTitle(edited.workspace.dir).catch(() => undefined)
     } catch (error) {
       // The member links are already correct; the title is cosmetic and the
       // next edit retries it, so the edit itself is still reported as done.
@@ -321,9 +318,6 @@ async function applyEdit(
       )
       title = owner.title
       titleAuto = edited.workspace.titleAuto
-      // The registry still holds this value: it is our own failed state, not a
-      // rename, so the next echo of it must not be recorded as a manual title.
-      await suppressStaleTitle(edited.workspace.dir, owner.title).catch(() => undefined)
     }
   }
   if (title !== edited.workspace.title || titleAuto !== edited.workspace.titleAuto) {

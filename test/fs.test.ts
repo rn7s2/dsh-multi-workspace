@@ -12,7 +12,6 @@ import {
   readCombinedWorkspaceWithin,
   removeFolders,
   resolveSources,
-  suppressStaleTitle,
   syncWorkspaceTitle,
 } from '../src/host/fs.js'
 import { HARD_MAX_PATHS } from '../src/shared/naming.js'
@@ -745,22 +744,54 @@ describe('concurrent adoption', () => {
   })
 })
 
-describe('failed title publication', () => {
-  it('keeps a suppressed stale title out of the manifest', async () => {
+describe('title sync provenance', () => {
+  it('keeps the recorded flag when the registry still carries the same title', async () => {
     const alpha = await makeSource('alpha')
     const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
     const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
-    await suppressStaleTitle(created.dir, 'alpha and beta')
+    // Simulate an edit whose title publication failed: the members moved on,
+    // the recorded title and its provenance did not.
+    await addFolders(created.dir, [gamma], { rootDir })
 
-    const changed = await syncWorkspaceTitle(created.dir, 'alpha and beta')
+    await expect(syncWorkspaceTitle(created.dir, 'alpha and beta')).resolves.toBe(false)
 
-    expect(changed).toBe(false)
-    expect((await readManifest(created.dir))).toMatchObject({
+    expect(await readManifest(created.dir)).toMatchObject({
       title: 'alpha and beta',
       titleAuto: true,
     })
-    // The suppression is one-shot: the next sync of the same value applies.
+    // Repeating it is equally inert: there is no one-shot suppression to spend.
+    await expect(syncWorkspaceTitle(created.dir, 'alpha and beta')).resolves.toBe(false)
+    expect((await readManifest(created.dir)).titleAuto).toBe(true)
+  })
+
+  it('treats a different title as a rename and records it as manual', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
     await expect(syncWorkspaceTitle(created.dir, 'My Workspace')).resolves.toBe(true)
-    expect((await readManifest(created.dir)).titleAuto).toBe(false)
+
+    expect(await readManifest(created.dir)).toMatchObject({
+      title: 'My Workspace',
+      titleAuto: false,
+    })
+  })
+
+  it('records an explicit automatic provenance', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    const edited = await addFolders(created.dir, [gamma], { rootDir })
+
+    await expect(
+      syncWorkspaceTitle(created.dir, edited.title, edited.titleAuto),
+    ).resolves.toBe(true)
+
+    expect(await readManifest(created.dir)).toMatchObject({
+      title: 'alpha, beta and gamma',
+      titleAuto: true,
+    })
   })
 })

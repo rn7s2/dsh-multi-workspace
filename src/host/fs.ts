@@ -18,29 +18,6 @@ import type { SelectionPlan } from './core.js'
 /** How many times a manifest write is retried after a rename race. */
 const MAX_MANIFEST_ATTEMPTS = 3
 
-/**
- * Title values that must not reach a manifest: the value the registry kept when
- * a publication failed. Without this, the stale record echoed back by the next
- * domain event would be read as an operator's manual choice.
- */
-const suppressedTitles = new Map<string, string>()
-
-/**
- * Ignore the next sync of one title for a directory, because it is the stale
- * registry value left behind by a publication that failed.
- * @param dir - combined workspace directory.
- * @param title - title the registry still holds.
- */
-export async function suppressStaleTitle(dir: string, title: string): Promise<void> {
-  const key = await realpath(dir).catch(() => resolve(dir))
-  suppressedTitles.set(key, title)
-}
-
-/** Forget a suppression once a publication has succeeded. */
-export async function clearStaleTitle(dir: string): Promise<void> {
-  suppressedTitles.delete(await realpath(dir).catch(() => resolve(dir)))
-}
-
 /** Tail of the mutation chain of each directory, keyed by its resolved path. */
 const mutationTails = new Map<string, Promise<void>>()
 
@@ -912,11 +889,16 @@ function messageOf(error: unknown): string {
 /**
  * Bring a manifest title back in step with the durable Workspace title after a
  * rename made elsewhere (the shipped Rename dialog writes the registry only).
- * A title that no longer matches its folders is recorded as manual, so a later
- * membership change cannot overwrite the operator's choice.
+ *
+ * Only a genuinely different title counts as a rename: when the Registry still
+ * carries the title the manifest already holds, its recorded automatic/manual
+ * flag is kept as it is. Re-deriving the flag there would judge the title
+ * against the folder list it was *not* built from — an edit whose publication
+ * failed would be read as an operator's manual choice and stop updating.
+ *
  * @param dir - combined workspace directory.
  * @param title - durable Workspace title.
- * @param titleAuto - provenance to record; omitted means "derive it from the members".
+ * @param titleAuto - provenance to record, used when the title really changes.
  * @returns true when the manifest changed.
  */
 export async function syncWorkspaceTitle(
@@ -925,15 +907,10 @@ export async function syncWorkspaceTitle(
   titleAuto?: boolean,
 ): Promise<boolean> {
   return await withWorkspaceLock(dir, async () => {
-    const key = await realpath(dir).catch(() => resolve(dir))
-    if (suppressedTitles.get(key) === title) {
-      suppressedTitles.delete(key)
-      return false
-    }
     const workspace = await readCombinedWorkspace(dir)
     if (workspace === null) return false
+    if (workspace.title === title) return false
     const nextAuto = titleAuto ?? isAutoTitle(title, workspace.links.map(link => link.target))
-    if (workspace.title === title && workspace.titleAuto === nextAuto) return false
     await writeManifest(dir, {
       version: 2,
       kind: 'dsh-multi-workspace',
