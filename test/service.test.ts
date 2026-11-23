@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, readdir, realpath, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { apply as applyHost, createMultiWorkspaceService } from '../src/host/index.js'
+import { MANIFEST_FILE } from '../src/shared/rpc.js'
 import { isUuid } from '../src/shared/uuid.js'
 
 let base: string
@@ -152,8 +153,12 @@ function makeRegistry(): {
 function makeServiceWithRegistry(
   rootDir: string,
   registry: ReturnType<typeof makeRegistry>['registry'] | undefined,
+  extra: Record<string, unknown> = {},
 ): ReturnType<typeof createMultiWorkspaceService> {
-  const services = new Map<string, unknown>([['workspaceRegistry', registry]])
+  const services = new Map<string, unknown>([
+    ['workspaceRegistry', registry],
+    ...Object.entries(extra),
+  ])
   return createMultiWorkspaceService({ get: (name: string) => services.get(name) } as never, rootDir)
 }
 
@@ -308,6 +313,23 @@ describe('combined-workspace cleanup', () => {
     await expect(stat(created.path)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('keeps the directory when somebody left a file in it', async () => {
+    const rootDir = join(base, 'workspaces')
+    const { registry, records } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+    const created = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+    await writeFile(join(created.path, 'notes.txt'), 'mine')
+    const fire = applyPlugin(rootDir, registry)
+
+    fire({ domain: 'workspace', table: 'workspaces', key: records[0]?.id, operation: 'put', value: records[0] })
+    fire({ domain: 'workspace', table: 'workspaces', key: records[0]?.id, operation: 'deleted' })
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+
+    expect((await stat(created.path)).isDirectory()).toBe(true)
+    expect((await readFile(join(created.path, 'notes.txt'), 'utf8'))).toBe('mine')
+    await expect(stat(join(created.path, 'alpha'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('keeps the directory of a workspace that owned a session', async () => {
     const rootDir = join(base, 'workspaces')
     const { registry, records } = makeRegistry()
@@ -326,5 +348,84 @@ describe('combined-workspace cleanup', () => {
     await new Promise(resolveWait => setTimeout(resolveWait, 100))
 
     expect((await stat(created.path)).isDirectory()).toBe(true)
+  })
+})
+
+describe('review fixes: inspection scope and session awareness', () => {
+  it('ignores a combined-looking directory outside the root', async () => {
+    const rootDir = join(base, 'workspaces')
+    const service = makeServiceWithRegistry(rootDir, makeRegistry().registry)
+    const foreign = join(base, 'elsewhere')
+    await mkdir(foreign, { recursive: true })
+    await writeFile(
+      join(foreign, MANIFEST_FILE),
+      JSON.stringify({
+        version: 2,
+        kind: 'dsh-multi-workspace',
+        id: 'x',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        title: 'x and y',
+        titleAuto: true,
+        links: [{ name: 'x', target: foreign }],
+      }),
+    )
+
+    await expect(service.inspect({ path: foreign })).resolves.toBeNull()
+  })
+
+  it('marks the members a live session is working in', async () => {
+    const rootDir = join(base, 'workspaces')
+    const service = makeServiceWithRegistry(rootDir, makeRegistry().registry)
+    const created = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+    const members = (await service.inspect({ path: created.path }))?.members ?? []
+    const alphaTarget = members.find(member => member.name === 'alpha')?.target ?? created.path
+    const cwd = join(alphaTarget, 'nested')
+    const session = { header: { cwd } }
+    const aware = makeServiceWithRegistry(rootDir, makeRegistry().registry, {
+      agents: { list: () => [{ session }] },
+      workingDirectory: { get: () => cwd },
+    })
+
+    const info = await aware.inspect({ path: created.path })
+
+    expect(info?.members.find(member => member.name === 'alpha')?.inUse).toBe(true)
+    expect(info?.members.find(member => member.name === 'beta')?.inUse).toBeUndefined()
+    // A composition without the Agent service simply reports nothing in use.
+    const plain = await service.inspect({ path: created.path })
+    expect(plain?.members.every(member => member.inUse === undefined)).toBe(true)
+  })
+
+  it('suffixes a new workspace title that another one already uses', async () => {
+    const rootDir = join(base, 'workspaces')
+    const service = makeServiceWithRegistry(rootDir, makeRegistry().registry)
+    const first = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+    await mkdir(join(base, 'alpha2'), { recursive: true })
+    await mkdir(join(base, 'beta2'), { recursive: true })
+
+    const second = await service.create({
+      paths: [join(base, 'alpha2'), join(base, 'beta2')],
+      title: 'alpha and beta',
+    })
+
+    expect(first.title).toBe('alpha and beta')
+    // An explicit title from the operator is respected rather than suffixed.
+    expect(second.title).toBe('alpha and beta')
+  })
+
+  it('still reports the edit as done when the title update fails', async () => {
+    await mkdir(join(base, 'gamma'), { recursive: true })
+    const rootDir = join(base, 'workspaces')
+    const { registry, records } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+    const created = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+    const record = records[0]
+    expect(record).toBeDefined()
+    if (record !== undefined) record.setTitle = async () => { throw new Error('title write failed') }
+
+    const updated = await service.addFolders({ path: created.path, paths: [join(base, 'gamma')] })
+
+    expect(updated.members.map(member => member.name)).toEqual(['alpha', 'beta', 'gamma'])
+    expect(updated.title).toBe('alpha, beta and gamma')
+    expect(record?.title).toBe('alpha and beta')
   })
 })

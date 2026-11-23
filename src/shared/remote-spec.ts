@@ -178,7 +178,23 @@ const infoJsonSchema = {
     path: { type: 'string', description: 'Absolute path of the real combined workspace directory.' },
     title: { type: 'string', description: 'Durable Workspace title.' },
     titleAuto: { type: 'boolean', description: 'Whether the title is derived from the current folders.' },
-    members: { type: 'array', items: linkJsonSchema, description: 'Symlinks in the directory, in member order.' },
+    members: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          target: { type: 'string' },
+          inUse: {
+            type: 'boolean',
+            description: 'A live session is working inside this folder right now.',
+          },
+        },
+        required: ['name', 'target'],
+        additionalProperties: false,
+      },
+      description: 'Symlinks in the directory, in member order.',
+    },
     workspaceId: { type: 'string', description: 'Durable Workspace id, when the directory is registered.' },
   },
   required: ['path', 'title', 'titleAuto', 'members'],

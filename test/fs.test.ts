@@ -6,11 +6,13 @@ import { SelectionError } from '../src/host/core.js'
 import type { SelectionErrorCode } from '../src/host/core.js'
 import {
   addFolders,
+  dissolveWorkspaceDirectory,
   materializeWorkspace,
   readCombinedWorkspace,
+  readCombinedWorkspaceWithin,
   removeFolders,
-  removeWorkspaceDirectory,
   resolveSources,
+  syncWorkspaceTitle,
 } from '../src/host/fs.js'
 import { HARD_MAX_PATHS } from '../src/shared/naming.js'
 import { MANIFEST_FILE } from '../src/shared/rpc.js'
@@ -575,20 +577,147 @@ describe('removeFolders', () => {
   })
 })
 
-describe('removeWorkspaceDirectory', () => {
-  it('removes the combined workspace but keeps the source directories', async () => {
+describe('dissolveWorkspaceDirectory', () => {
+  it('removes the links, the manifest and the directory but keeps the folders', async () => {
     const alpha = await makeSource('alpha')
     const beta = await makeSource('beta')
     const result = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
 
-    await removeWorkspaceDirectory(result.dir)
+    await expect(dissolveWorkspaceDirectory(result.dir)).resolves.toBe(true)
 
     await expect(stat(result.dir)).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await stat(alpha)).isDirectory()).toBe(true)
     expect((await stat(beta)).isDirectory()).toBe(true)
   })
 
-  it('is a no-op for a directory that is already gone', async () => {
-    await expect(removeWorkspaceDirectory(join(rootDir, 'missing'))).resolves.toBeUndefined()
+  it('keeps a file somebody put in the directory, and the directory with it', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const result = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    await writeFile(join(result.dir, 'notes.txt'), 'mine')
+
+    await expect(dissolveWorkspaceDirectory(result.dir)).resolves.toBe(false)
+
+    expect(await readFile(join(result.dir, 'notes.txt'), 'utf8')).toBe('mine')
+    await expect(lstat(join(result.dir, 'alpha'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(lstat(join(result.dir, MANIFEST_FILE))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await stat(alpha)).isDirectory()).toBe(true)
+  })
+
+  it('keeps an entry that is no longer a link, and still drops the rest', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const result = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    await rm(join(result.dir, 'beta'))
+    await mkdir(join(result.dir, 'beta'))
+    await writeFile(join(result.dir, 'beta', 'keep.txt'), 'keep')
+
+    await expect(dissolveWorkspaceDirectory(result.dir)).resolves.toBe(false)
+
+    expect(await readFile(join(result.dir, 'beta', 'keep.txt'), 'utf8')).toBe('keep')
+  })
+
+  it('reports false for a directory that is not a combined workspace', async () => {
+    const plain = await makeSource('plain')
+    await expect(dissolveWorkspaceDirectory(plain)).resolves.toBe(false)
+    expect((await stat(plain)).isDirectory()).toBe(true)
+  })
+})
+
+describe('review fixes', () => {
+  it('applies the collision suffix when a new workspace is created', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+
+    const result = await materializeWorkspace({
+      rootDir,
+      paths: [alpha, beta],
+      takenTitles: ['alpha and beta'],
+    })
+
+    expect(result.title).toBe('alpha and beta (2)')
+    expect(result.titleAuto).toBe(true)
+    expect((await readManifest(result.dir)).title).toBe('alpha and beta (2)')
+  })
+
+  it('keeps retitling a title that carries a collision suffix', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({
+      rootDir,
+      paths: [alpha, beta],
+      takenTitles: ['alpha and beta'],
+    })
+    expect(created.title).toBe('alpha and beta (2)')
+
+    const { workspace } = await addFolders(created.dir, [gamma], { rootDir })
+
+    expect(workspace.title).toBe('alpha, beta and gamma')
+    expect(workspace.titleAuto).toBe(true)
+  })
+
+  it('removes a member whose link was deleted by hand', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta, gamma] })
+    await rm(join(created.dir, 'beta'))
+
+    const { workspace, changed } = await removeFolders(created.dir, ['beta'], { rootDir })
+
+    expect(changed.map(link => link.name)).toEqual(['beta'])
+    expect(workspace.links.map(link => link.name)).toEqual(['alpha', 'gamma'])
+    expect((await stat(beta)).isDirectory()).toBe(true)
+  })
+
+  it('keeps both members when two edits overlap', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const delta = await makeSource('delta')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
+    await Promise.all([
+      addFolders(created.dir, [gamma], { rootDir }),
+      addFolders(created.dir, [delta], { rootDir }),
+    ])
+
+    const workspace = await readCombinedWorkspace(created.dir)
+    expect(workspace?.links.map(link => link.name).sort()).toEqual(['alpha', 'beta', 'delta', 'gamma'])
+  })
+
+  it('does not let a concurrent title sync drop a member the edit just added', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
+    await Promise.all([
+      addFolders(created.dir, [gamma], { rootDir }),
+      syncWorkspaceTitle(created.dir, 'alpha and beta'),
+    ])
+
+    const workspace = await readCombinedWorkspace(created.dir)
+    expect(workspace?.links.map(link => link.name)).toContain('gamma')
+  })
+
+  it('ignores a directory outside the root, whatever its manifest says', async () => {
+    const foreign = await makeSource('foreign')
+    await writeFile(
+      join(foreign, MANIFEST_FILE),
+      JSON.stringify({
+        version: 2,
+        kind: 'dsh-multi-workspace',
+        id: 'x',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        title: 'x and y',
+        titleAuto: true,
+        links: [{ name: 'x', target: foreign }],
+      }),
+    )
+
+    await expect(readCombinedWorkspaceWithin(foreign, rootDir)).resolves.toBeNull()
+    await expect(readCombinedWorkspace(foreign)).resolves.not.toBeNull()
   })
 })

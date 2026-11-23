@@ -7,9 +7,9 @@
  *
  * @module dsh-multi-workspace/host/fs
  */
-import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, rmdir, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { basename, isAbsolute, join, resolve, sep } from 'node:path'
-import { HARD_MAX_PATHS, deriveTitleFromPaths, isDerivedTitle, uniqueTitle } from '../shared/naming.js'
+import { HARD_MAX_PATHS, deriveTitleFromPaths, isAutoTitle, uniqueTitle } from '../shared/naming.js'
 import { MANIFEST_FILE, MIN_MEMBERS, type WorkspaceLink } from '../shared/rpc.js'
 import { uuidv7 } from '../shared/uuid.js'
 import { SelectionError, buildPlan, planAddition, planRemoval } from './core.js'
@@ -17,6 +17,32 @@ import type { SelectionPlan } from './core.js'
 
 /** How many times a manifest write is retried after a rename race. */
 const MAX_MANIFEST_ATTEMPTS = 3
+
+/** Tail of the mutation chain of each directory, keyed by its resolved path. */
+const mutationTails = new Map<string, Promise<void>>()
+
+/**
+ * Serialize every mutation of one combined workspace. Two edits at once, or an
+ * edit racing the manifest sync that follows a rename, would otherwise
+ * interleave their read-modify-write pairs and drop a member.
+ * @param dir - directory the mutation touches.
+ * @param run - the mutation to perform.
+ * @returns the mutation's result.
+ */
+async function withWorkspaceLock<T>(dir: string, run: () => Promise<T>): Promise<T> {
+  const key = await realpath(dir).catch(() => resolve(dir))
+  const prior = mutationTails.get(key) ?? Promise.resolve()
+  const settled = prior.then(run, run)
+  const tail = settled.then(
+    () => undefined,
+    () => undefined,
+  )
+  mutationTails.set(key, tail)
+  void tail.then(() => {
+    if (mutationTails.get(key) === tail) mutationTails.delete(key)
+  })
+  return await settled
+}
 
 /** Manifest versions this build understands; 1 predates the UUID identity. */
 const VERSIONS = [1, 2] as const
@@ -65,6 +91,8 @@ export interface MaterializeOptions {
   title?: string
   /** Minimum number of folders required; defaults to 2. */
   minPaths?: number
+  /** Titles of the other registered workspaces, used to keep an automatic title unique. */
+  takenTitles?: readonly string[]
 }
 
 /** Result of a successful materialization. */
@@ -233,7 +261,10 @@ export async function materializeWorkspace(options: MaterializeOptions): Promise
     rootDir,
     ...(options.minPaths === undefined ? {} : { minPaths: options.minPaths }),
   })
-  const plan = options.title === undefined ? buildPlan(sources) : buildPlan(sources, { title: options.title })
+  const basePlan = options.title === undefined ? buildPlan(sources) : buildPlan(sources, { title: options.title })
+  const plan: SelectionPlan = basePlan.titleAuto
+    ? { ...basePlan, title: uniqueTitle(basePlan.title, options.takenTitles ?? []) }
+    : basePlan
 
   try {
     await mkdir(rootDir, { recursive: true })
@@ -280,6 +311,22 @@ export async function materializeWorkspace(options: MaterializeOptions): Promise
  * @throws {SelectionError} for an unknown directory, a duplicate member, or a failed write.
  */
 export async function addFolders(
+  dir: string,
+  paths: readonly string[],
+  options: EditOptions,
+): Promise<EditedWorkspace> {
+  const target = resolve(dir)
+  return await withWorkspaceLock(target, () => addFoldersLocked(target, paths, options))
+}
+
+/**
+ * Append folders with the directory lock already held.
+ * @param dir - absolute combined-workspace directory.
+ * @param paths - absolute directories to link in.
+ * @param options - workspace root, sibling titles, and member floor.
+ * @returns the updated workspace and the links that were added.
+ */
+async function addFoldersLocked(
   dir: string,
   paths: readonly string[],
   options: EditOptions,
@@ -346,6 +393,22 @@ export async function removeFolders(
   names: readonly string[],
   options: EditOptions,
 ): Promise<EditedWorkspace> {
+  const target = resolve(dir)
+  return await withWorkspaceLock(target, () => removeFoldersLocked(target, names, options))
+}
+
+/**
+ * Remove folders with the directory lock already held.
+ * @param dir - absolute combined-workspace directory.
+ * @param names - entry names to drop.
+ * @param options - workspace root, sibling titles, and member floor.
+ * @returns the updated workspace and the links that were removed.
+ */
+async function removeFoldersLocked(
+  dir: string,
+  names: readonly string[],
+  options: EditOptions,
+): Promise<EditedWorkspace> {
   const workspace = await requireCombinedWorkspace(dir, options.rootDir)
   const { remaining, removed } = planRemoval(workspace.links, names, options.minMembers ?? MIN_MEMBERS)
 
@@ -353,7 +416,10 @@ export async function removeFolders(
   try {
     for (const link of removed) {
       const entryPath = join(workspace.dir, link.name)
-      const info = await lstat(entryPath)
+      const info = await lstat(entryPath).catch(() => null)
+      // The link may already be gone (removed by hand, or by an earlier
+      // partial run); the manifest entry is still ours to drop.
+      if (info === null) continue
       if (!info.isSymbolicLink()) {
         throw new SelectionError(
           'materialize-failed',
@@ -379,6 +445,26 @@ export async function removeFolders(
     await restoreLinks(workspace.dir, unlinked)
     throw error
   }
+}
+
+/**
+ * Read a combined workspace directory, but only when it really lives under the
+ * plugin's own root. A directory elsewhere that happens to hold a file with the
+ * manifest name is not ours to read or edit.
+ * @param dir - absolute directory named by a caller.
+ * @param rootDir - configured combined-workspace root.
+ * @returns the workspace, or null when it is not a combined workspace under the root.
+ */
+export async function readCombinedWorkspaceWithin(
+  dir: string,
+  rootDir: string,
+): Promise<CombinedWorkspace | null> {
+  if (!isAbsolute(dir)) return null
+  const absolute = resolve(dir)
+  const root = await canonicalRoot(rootDir)
+  const real = await realpath(absolute).catch(() => absolute)
+  if (!isInsideRoot(real, root)) return null
+  return await readCombinedWorkspace(real)
 }
 
 /**
@@ -410,7 +496,7 @@ export async function readCombinedWorkspace(dir: string): Promise<CombinedWorksp
   const titleAuto =
     typeof record['titleAuto'] === 'boolean'
       ? record['titleAuto']
-      : isDerivedTitle(title, links.map(link => link.target))
+      : isAutoTitle(title, links.map(link => link.target))
   const createdAt = typeof record['createdAt'] === 'string' ? record['createdAt'] : ''
   return {
     dir: resolve(dir),
@@ -423,11 +509,65 @@ export async function readCombinedWorkspace(dir: string): Promise<CombinedWorksp
 }
 
 /**
- * Delete a combined workspace directory. Symlinked members are unlinked, never
- * traversed, so no member content is ever removed.
+ * Take a combined workspace directory apart without touching anything it did
+ * not create: the member links named by the manifest, the manifest itself, and
+ * any manifest temporary file this build may have left behind are unlinked,
+ * then the directory is removed only once it is empty.
+ *
+ * A file somebody dropped into the directory, or a member entry that is no
+ * longer a symlink, is left in place — the directory then stays and is adopted
+ * again when the same folders are picked.
+ *
  * @param dir - absolute workspace directory.
+ * @returns true when the directory was removed, false when foreign content kept it.
  */
-export async function removeWorkspaceDirectory(dir: string): Promise<void> {
+export async function dissolveWorkspaceDirectory(dir: string): Promise<boolean> {
+  const workspace = await readCombinedWorkspace(dir)
+  if (workspace === null) return false
+  await withWorkspaceLock(dir, async () => {
+    for (const link of workspace.links) {
+      const entryPath = join(dir, link.name)
+      const info = await lstat(entryPath).catch(() => null)
+      if (info !== null && info.isSymbolicLink()) await unlink(entryPath).catch(() => undefined)
+    }
+    let names: string[] = []
+    try {
+      names = await readdir(dir)
+    } catch {
+      return
+    }
+    for (const name of names) {
+      if (!isManifestArtifact(name)) continue
+      const entryPath = join(dir, name)
+      const info = await lstat(entryPath).catch(() => null)
+      if (info !== null && info.isFile()) await unlink(entryPath).catch(() => undefined)
+    }
+  })
+  try {
+    await rmdir(dir)
+    return true
+  } catch {
+    // Anything left is not ours: keep it, and keep the directory with it.
+    return false
+  }
+}
+
+/**
+ * Whether a directory entry name is a manifest or one of its temporary files.
+ * @param name - entry name inside a combined workspace directory.
+ * @returns true for `MANIFEST_FILE` and `MANIFEST_FILE.<pid>.<n>.tmp`.
+ */
+function isManifestArtifact(name: string): boolean {
+  if (name === MANIFEST_FILE) return true
+  return name.startsWith(`${MANIFEST_FILE}.`) && name.endsWith('.tmp')
+}
+
+/**
+ * Delete a directory this call has just created, and everything below it.
+ * Only safe for a directory whose contents are entirely ours.
+ * @param dir - freshly created workspace directory.
+ */
+async function discardCreatedDirectory(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true })
 }
 
@@ -598,7 +738,7 @@ async function createWorkspaceDirectory(rootDir: string, plan: SelectionPlan): P
     return dir
   } catch (cause) {
     try {
-      await rm(dir, { recursive: true, force: true })
+      await discardCreatedDirectory(dir)
     } catch {
       // Best effort: the original failure is the one worth reporting.
     }
@@ -737,17 +877,19 @@ function messageOf(error: unknown): string {
  * @returns true when the manifest changed.
  */
 export async function syncWorkspaceTitle(dir: string, title: string): Promise<boolean> {
-  const workspace = await readCombinedWorkspace(dir)
-  if (workspace === null || workspace.title === title) return false
-  const titleAuto = isDerivedTitle(title, workspace.links.map(link => link.target))
-  await writeManifest(dir, {
-    version: 2,
-    kind: 'dsh-multi-workspace',
-    id: workspace.id,
-    createdAt: workspace.createdAt === '' ? new Date().toISOString() : workspace.createdAt,
-    title,
-    titleAuto,
-    links: workspace.links,
+  return await withWorkspaceLock(dir, async () => {
+    const workspace = await readCombinedWorkspace(dir)
+    if (workspace === null || workspace.title === title) return false
+    const titleAuto = isAutoTitle(title, workspace.links.map(link => link.target))
+    await writeManifest(dir, {
+      version: 2,
+      kind: 'dsh-multi-workspace',
+      id: workspace.id,
+      createdAt: workspace.createdAt === '' ? new Date().toISOString() : workspace.createdAt,
+      title,
+      titleAuto,
+      links: workspace.links,
+    })
+    return true
   })
-  return true
 }

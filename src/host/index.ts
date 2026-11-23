@@ -18,11 +18,11 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { SelectionError } from './core.js'
 import {
   addFolders,
+  dissolveWorkspaceDirectory,
   materializeWorkspace,
-  readCombinedWorkspace,
+  readCombinedWorkspaceWithin,
   removeFolders,
   syncWorkspaceTitle,
-  removeWorkspaceDirectory,
 } from './fs.js'
 import type { EditedWorkspace, MaterializedWorkspace } from './fs.js'
 import { buildDirectoryListing, ListingError } from './listing.js'
@@ -58,6 +58,8 @@ interface HostContext {
   inject(dependencies: string[], callback: (scope: unknown) => void): void
   /** Cordis event subscription; absent in minimal test contexts. */
   on?(event: 'domain/changed', listener: (change: DomainChangedLike) => void): () => void
+  /** Cordis logger; absent in minimal test contexts. */
+  logger?: { warn?(message: string): void }
 }
 
 /** One durable-domain change, as far as this plugin inspects it. */
@@ -203,6 +205,61 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** One live Agent, as far as its Session directory matters here. */
+interface LiveAgentLike {
+  readonly session?: { readonly header?: { readonly cwd?: string } }
+}
+
+/** The live-Agent registry this plugin reads. */
+interface AgentsLike {
+  list(): readonly LiveAgentLike[]
+}
+
+/** Whether `cwd` is `dir` itself or sits below it. */
+function contains(dir: string, cwd: string): boolean {
+  if (cwd === dir) return true
+  const prefix = dir.endsWith(sep) ? dir : `${dir}${sep}`
+  return cwd.startsWith(prefix)
+}
+
+/**
+ * Working directories of the sessions running now, in canonical spelling so
+ * they can be matched against the canonical member targets.
+ * @param ctx - Host plugin context.
+ * @returns directories of live sessions; empty when no Agent service is present.
+ */
+async function liveWorkingDirectories(ctx: HostContext): Promise<string[]> {
+  const agents = ctx.get('agents') as AgentsLike | undefined
+  if (agents === undefined || typeof agents.list !== 'function') return []
+  const workingDirectory = ctx.get('workingDirectory') as
+    | { get(session: unknown): string }
+    | undefined
+  const directories: string[] = []
+  let live: readonly LiveAgentLike[]
+  try {
+    live = agents.list()
+  } catch {
+    return []
+  }
+  for (const agent of live) {
+    let cwd: unknown
+    try {
+      cwd =
+        agent.session !== undefined &&
+        workingDirectory !== undefined &&
+        typeof workingDirectory.get === 'function'
+          ? workingDirectory.get(agent.session)
+          : agent.session?.header?.cwd
+    } catch {
+      cwd = agent.session?.header?.cwd
+    }
+    if (typeof cwd === 'string' && cwd !== '') {
+      directories.push(await realpath(cwd).catch(() => cwd))
+    }
+  }
+  return directories
+}
+
 /**
  * Titles of the other registered workspaces, used when an edit recomputes an
  * automatic title.
@@ -249,9 +306,10 @@ async function applyEdit(
     try {
       await owner.setTitle(edited.workspace.title)
     } catch (error) {
-      throw new RemoteFailure(
-        'multi-workspace/edit-failed',
-        `The folders changed, but the workspace title could not be updated: ${errorMessage(error)}`,
+      // The member links are already correct; the title is cosmetic and the
+      // next sync retries it, so the edit itself is still reported as done.
+      ctx.logger?.warn?.(
+        `multi-workspace: folders changed in "${edited.workspace.dir}" but the title update failed: ${errorMessage(error)}`,
       )
     }
   }
@@ -338,8 +396,8 @@ async function dropDirectory(rootDir: string, path: string): Promise<void> {
       return path === root || path.startsWith(prefix)
     })
     if (!inside) return
-    if ((await readCombinedWorkspace(path)) === null) return
-    await removeWorkspaceDirectory(path)
+    if ((await readCombinedWorkspaceWithin(path, rootDir)) === null) return
+    await dissolveWorkspaceDirectory(path)
   } catch {
     // Best effort: a directory left behind is inert and gets adopted later.
   }
@@ -413,6 +471,7 @@ export function createMultiWorkspaceService(ctx: HostContext, rootDir: string): 
         materialized = await materializeWorkspace({
           rootDir,
           paths: parsed.data.paths,
+          takenTitles: siblingOptions(ctx).takenTitles,
           ...(title === undefined ? {} : { title }),
         })
       } catch (error) {
@@ -425,7 +484,7 @@ export function createMultiWorkspaceService(ctx: HostContext, rootDir: string): 
       }
 
       if (registry === undefined) {
-        await removeWorkspaceDirectory(materialized.dir)
+        if (!materialized.adopted) await dissolveWorkspaceDirectory(materialized.dir)
         throw new RemoteFailure(
           'multi-workspace/unavailable',
           'The workspace registry is unavailable in this Host composition.',
@@ -436,9 +495,9 @@ export function createMultiWorkspaceService(ctx: HostContext, rootDir: string): 
       try {
         workspace = await registry.create(materialized.dir, materialized.title)
       } catch (error) {
-        // The registry rejected the registration; do not leave an unreferenced
-        // directory behind.
-        await removeWorkspaceDirectory(materialized.dir)
+        // The registry rejected the registration; do not leave a directory we
+        // created behind. An adopted directory is somebody else's: keep it.
+        if (!materialized.adopted) await dissolveWorkspaceDirectory(materialized.dir)
         throw new RemoteFailure('multi-workspace/register-failed', errorMessage(error))
       }
 
@@ -459,14 +518,18 @@ export function createMultiWorkspaceService(ctx: HostContext, rootDir: string): 
           issues: parsed.error.issues.map(issue => issue.message),
         })
       }
-      const workspace = await readCombinedWorkspace(parsed.data.path)
+      const workspace = await readCombinedWorkspaceWithin(parsed.data.path, rootDir)
       if (workspace === null) return null
       const owner = await ownedWorkspace(registryOf(ctx), workspace.dir)
+      const busy = await liveWorkingDirectories(ctx)
       return {
         path: workspace.dir,
         title: workspace.title,
         titleAuto: workspace.titleAuto,
-        members: workspace.links,
+        members: workspace.links.map(link => ({
+          ...link,
+          ...(busy.some(cwd => contains(link.target, cwd)) ? { inUse: true } : {}),
+        })),
         ...(owner === undefined ? {} : { workspaceId: String(owner.id) }),
       }
     },

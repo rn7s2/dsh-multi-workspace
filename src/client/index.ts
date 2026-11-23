@@ -26,8 +26,12 @@ import { FoldersSurface } from './manage.js'
 import type { FoldersSurfaceInjected } from './manage.js'
 import { openFoldersRequest } from './requests.js'
 
-/** Required Client services. */
-export const inject = ['slots', 'locale', 'remote', 'contextMenus']
+/**
+ * Required Client services. The Workspace menu is deliberately absent: the
+ * folder-editing rows are an addition, so a harness without its context-menu
+ * service still loads this plugin and keeps creating workspaces.
+ */
+export const inject = ['slots', 'locale', 'remote']
 
 /** One `RemoteResult` branch of a generated Client Remote call. */
 type RemoteResult<T> =
@@ -97,9 +101,10 @@ interface ClientContext {
     bind(namespace: string): Translate
   }
   remote: ClientRemoteService
-  contextMenus: ContextMenusLike
   /** Read a service without declaring it in `inject` (used for the mounted namespace). */
   get(name: string): unknown
+  /** Register a callback that runs once the given services exist. */
+  inject(dependencies: string[], callback: (scope: { contextMenus: ContextMenusLike }) => (() => void) | void): () => void
   effect(callback: () => (() => void) | void, label?: string): () => void
 }
 
@@ -204,10 +209,12 @@ export async function apply(context: unknown): Promise<() => Promise<void>> {
   )
 
   // Workspace menu rows: both are additive data contributions, so the shipped
-  // Rename / Delete rows stay exactly where they are.
-  const disposeMenu = ctx.effect(
+  // Rename / Delete rows stay exactly where they are. The callback runs only
+  // while the optional context-menu service is present, and its registration
+  // is disposed with the injection it was made under.
+  ctx.effect(
     () =>
-      ctx.contextMenus.register({
+      ctx.inject(['contextMenus'], scope => scope.contextMenus.register({
         id: 'multi-workspace.folders',
         target: 'workspace',
         order: 120,
@@ -246,7 +253,7 @@ export async function apply(context: unknown): Promise<() => Promise<void>> {
           }
           return rows
         },
-      }),
+      })),
     'multi-workspace: workspace menu rows',
   )
 
@@ -265,7 +272,6 @@ export async function apply(context: unknown): Promise<() => Promise<void>> {
 
   return async () => {
     disposeSurface()
-    disposeMenu()
     disposeSlots()
     disposeLocale()
     await disposeRemote()
