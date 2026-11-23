@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -280,8 +280,12 @@ describe('multiWorkspace service edits', () => {
 function applyPlugin(
   rootDir: string,
   registry: ReturnType<typeof makeRegistry>['registry'],
+  extra: Record<string, unknown> = {},
 ): (change: Record<string, unknown>) => void {
-  const services = new Map<string, unknown>([['workspaceRegistry', registry]])
+  const services = new Map<string, unknown>([
+    ['workspaceRegistry', registry],
+    ...Object.entries(extra),
+  ])
   let listener: ((change: Record<string, unknown>) => void) | undefined
   const ctx = {
     get: (name: string) => services.get(name),
@@ -332,7 +336,7 @@ describe('combined-workspace cleanup', () => {
     await expect(stat(join(created.path, 'alpha'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('keeps the directory of a workspace that owned a session', async () => {
+  it('drops the directory even when the workspace owned sessions, if none is live', async () => {
     const rootDir = join(base, 'workspaces')
     const { registry, records } = makeRegistry()
     const service = makeServiceWithRegistry(rootDir, registry)
@@ -347,9 +351,37 @@ describe('combined-workspace cleanup', () => {
       value: { ...records[0], sessionIds: ['session-1'] },
     })
     fire({ domain: 'workspace', table: 'workspaces', key: records[0]?.id, operation: 'deleted' })
-    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+    await new Promise(resolveWait => setTimeout(resolveWait, 150))
+
+    await expect(stat(created.path)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await stat(join(base, 'alpha'))).isDirectory()).toBe(true)
+  })
+
+  it('keeps the directory while a live session works inside it', async () => {
+    const rootDir = join(base, 'workspaces')
+    const { registry, records } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+    const created = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+    const members = (await service.inspect({ path: created.path }))?.members ?? []
+    const alphaTarget = members.find(member => member.name === 'alpha')?.target ?? created.path
+    const cwd = join(alphaTarget, 'nested')
+    const fire = applyPlugin(rootDir, registry, {
+      agents: { list: () => [{ session: { header: { cwd } } }] },
+      workingDirectory: { get: () => cwd },
+    })
+
+    fire({
+      domain: 'workspace',
+      table: 'workspaces',
+      key: records[0]?.id,
+      operation: 'put',
+      value: { ...records[0], sessionIds: ['session-1'] },
+    })
+    fire({ domain: 'workspace', table: 'workspaces', key: records[0]?.id, operation: 'deleted' })
+    await new Promise(resolveWait => setTimeout(resolveWait, 150))
 
     expect((await stat(created.path)).isDirectory()).toBe(true)
+    expect((await lstat(join(created.path, 'alpha'))).isSymbolicLink()).toBe(true)
   })
 })
 

@@ -333,25 +333,22 @@ async function applyEdit(
 }
 
 /**
- * Follow Workspace-record deletions and drop the directory behind a workspace
- * that never owned a Session. A directory whose workspace held Sessions is
- * kept: those Sessions keep the path as their recorded cwd, and the directory
- * is adopted again if the same folders are picked later.
+ * Follow Workspace-record deletions and take the directory apart, unless a live
+ * Session is working inside it right now. An attached but idle Session keeps
+ * the recorded cwd; losing a directory it is not using costs nothing, while a
+ * directory left behind forever costs the operator the deletion they asked
+ * for. Anything the plugin did not create keeps the directory alive either, so
+ * it is adopted again if the same folders are picked later.
  * @param ctx - Host plugin context.
  * @param rootDir - combined-workspace root.
  */
 function registerDirectoryCleanup(ctx: HostContext, rootDir: string): void {
   if (typeof ctx.on !== 'function') return
-  const known = new Map<string, { path: string; sessions: number }>()
+  const known = new Map<string, string>()
   const registry = registryOf(ctx)
   if (registry !== undefined && typeof registry.list === 'function') {
     try {
-      for (const workspace of registry.list()) {
-        known.set(String(workspace.id), {
-          path: workspace.path,
-          sessions: (workspace.sessionIds ?? []).length,
-        })
-      }
+      for (const workspace of registry.list()) known.set(String(workspace.id), workspace.path)
     } catch {
       // A registry that cannot list simply starts with no history.
     }
@@ -367,10 +364,7 @@ function registerDirectoryCleanup(ctx: HostContext, rootDir: string): void {
         title?: unknown
       } | null
       if (record === null || record === undefined || typeof record.path !== 'string') return
-      known.set(key, {
-        path: record.path,
-        sessions: Array.isArray(record.sessionIds) ? record.sessionIds.length : 0,
-      })
+      known.set(key, record.path)
       // The shipped Rename dialog writes the registry, not our manifest; keep
       // the two in step so a later membership change cannot undo that rename.
       if (typeof record.title === 'string' && record.title !== '') {
@@ -379,38 +373,22 @@ function registerDirectoryCleanup(ctx: HostContext, rootDir: string): void {
       return
     }
     if (change.operation !== 'deleted') return
-    const entry = known.get(key)
+    const path = known.get(key)
     known.delete(key)
-    if (entry === undefined || entry.sessions > 0) return
-    void dropDirectory(rootDir, entry.path)
+    if (path === undefined) return
+    // An idle session keeps working with a directory that no longer exists as
+    // badly as a running one; only live work is worth keeping it for. A Session
+    // may sit in the workspace directory itself or inside any member folder, so
+    // both are checked.
+    void (async () => {
+      const workspace = await readCombinedWorkspaceWithin(path, rootDir)
+      if (workspace === null) return
+      const busy = await liveWorkingDirectories(ctx)
+      const targets = [workspace.dir, ...workspace.links.map(link => link.target)]
+      if (busy.some(cwd => targets.some(target => contains(target, cwd)))) return
+      await dissolveWorkspaceDirectory(workspace.dir)
+    })()
   })
-}
-
-/**
- * Remove one combined-workspace directory when it really is one under the root.
- * @param rootDir - combined-workspace root.
- * @param path - directory the deleted workspace pointed at.
- */
-async function dropDirectory(rootDir: string, path: string): Promise<void> {
-  try {
-    // The record path is canonical, but the configured root may still carry a
-    // symlinked spelling (/var vs /private/var), so both forms are compared.
-    const roots = new Set<string>([resolve(rootDir)])
-    try {
-      roots.add(await realpath(resolve(rootDir)))
-    } catch {
-      // A missing root cannot contain the directory anyway.
-    }
-    const inside = [...roots].some(root => {
-      const prefix = root.endsWith(sep) ? root : `${root}${sep}`
-      return path === root || path.startsWith(prefix)
-    })
-    if (!inside) return
-    if ((await readCombinedWorkspaceWithin(path, rootDir)) === null) return
-    await dissolveWorkspaceDirectory(path)
-  } catch {
-    // Best effort: a directory left behind is inert and gets adopted later.
-  }
 }
 
 /**

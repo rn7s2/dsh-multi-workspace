@@ -84,8 +84,8 @@ note for combined workspaces; the essentials:
 - Deleting a workspace is careful: only the links named by the manifest and the manifest itself are
   removed, then the directory is dropped once it is empty. A file you put in there — or a member
   entry that is no longer a link — keeps the directory alive, and it is adopted again if the same
-  folders are picked later. A workspace that ever owned a session keeps its directory too, because
-  those sessions hold that path as their recorded cwd.
+  folders are picked later. The same applies while a session is running inside the workspace; an
+  idle one does not hold the directory back, so deleting a workspace really does clean up.
 - The removal dialog marks members a running session is working in, and warns before removing them.
 - A title renamed through the shipped dialog is written back into the manifest, so a later add or
   remove cannot undo it. Two workspaces that would derive the same title get ` (2)`, ` (3)`, … and
