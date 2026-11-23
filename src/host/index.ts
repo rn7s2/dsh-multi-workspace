@@ -18,10 +18,12 @@ import { isAbsolute, join, resolve, sep } from 'node:path'
 import { SelectionError } from './core.js'
 import {
   addFolders,
+  clearStaleTitle,
   dissolveWorkspaceDirectory,
   materializeWorkspace,
   readCombinedWorkspaceWithin,
   removeFolders,
+  suppressStaleTitle,
   syncWorkspaceTitle,
 } from './fs.js'
 import type { EditedWorkspace, MaterializedWorkspace } from './fs.js'
@@ -302,21 +304,35 @@ async function applyEdit(
     throw new RemoteFailure('multi-workspace/edit-failed', errorMessage(error))
   }
   const owner = await ownedWorkspace(registryOf(ctx), edited.workspace.dir)
-  if (owner !== undefined && typeof owner.setTitle === 'function' && owner.title !== edited.workspace.title) {
+  // Publish the title first, then record it. A publication that fails leaves
+  // both sides on the previous automatic title, which is exactly what keeps a
+  // later sync from mistaking a stale registry value for a manual choice.
+  let title = edited.title
+  let titleAuto = edited.titleAuto
+  if (owner !== undefined && typeof owner.setTitle === 'function' && owner.title !== edited.title) {
     try {
-      await owner.setTitle(edited.workspace.title)
+      await owner.setTitle(edited.title)
+      await clearStaleTitle(edited.workspace.dir).catch(() => undefined)
     } catch (error) {
       // The member links are already correct; the title is cosmetic and the
-      // next sync retries it, so the edit itself is still reported as done.
+      // next edit retries it, so the edit itself is still reported as done.
       ctx.logger?.warn?.(
         `multi-workspace: folders changed in "${edited.workspace.dir}" but the title update failed: ${errorMessage(error)}`,
       )
+      title = owner.title
+      titleAuto = edited.workspace.titleAuto
+      // The registry still holds this value: it is our own failed state, not a
+      // rename, so the next echo of it must not be recorded as a manual title.
+      await suppressStaleTitle(edited.workspace.dir, owner.title).catch(() => undefined)
     }
+  }
+  if (title !== edited.workspace.title || titleAuto !== edited.workspace.titleAuto) {
+    await syncWorkspaceTitle(edited.workspace.dir, title, titleAuto).catch(() => undefined)
   }
   return {
     path: edited.workspace.dir,
-    title: edited.workspace.title,
-    titleAuto: edited.workspace.titleAuto,
+    title,
+    titleAuto,
     members: edited.workspace.links,
     changed: edited.changed,
   }

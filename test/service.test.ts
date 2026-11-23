@@ -425,7 +425,25 @@ describe('review fixes: inspection scope and session awareness', () => {
     const updated = await service.addFolders({ path: created.path, paths: [join(base, 'gamma')] })
 
     expect(updated.members.map(member => member.name)).toEqual(['alpha', 'beta', 'gamma'])
-    expect(updated.title).toBe('alpha, beta and gamma')
+    // The edit stands; the title stays on its previous automatic value.
+    expect(updated.title).toBe('alpha and beta')
+    expect(updated.titleAuto).toBe(true)
     expect(record?.title).toBe('alpha and beta')
+
+    // The stale value the registry echoes back is not read as a manual title,
+    // so the next edit still recomputes it.
+    const manifest = JSON.parse(await readFile(join(created.path, MANIFEST_FILE), 'utf8')) as {
+      title: string
+      titleAuto: boolean
+    }
+    expect(manifest).toMatchObject({ title: 'alpha and beta', titleAuto: true })
+
+    // A stale echo of the published-failed title is ignored, so the next edit
+    // still recomputes from the folders.
+    await mkdir(join(base, 'delta'), { recursive: true })
+    if (record !== undefined) record.setTitle = async next => { record.title = next }
+    const again = await service.addFolders({ path: created.path, paths: [join(base, 'delta')] })
+    expect(again.title).toBe('alpha, beta, gamma and delta')
+    expect(again.titleAuto).toBe(true)
   })
 })
