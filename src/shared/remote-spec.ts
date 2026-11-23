@@ -8,17 +8,25 @@
 import { z } from 'zod'
 import type { RemoteCodecSpec, RemoteSpec } from './remote-info.js'
 import {
+  ADD_ENDPOINT,
   CREATE_ENDPOINT,
+  INSPECT_ENDPOINT,
   LIST_ENDPOINT,
   NAMESPACE,
   PACKAGE_NAME,
   PICK_ENDPOINT,
+  REMOVE_ENDPOINT,
+  addRequestSchema,
   createRequestSchema,
   createResultSchema,
+  inspectRequestSchema,
+  inspectResultSchema,
   listPathSchema,
   listingResultSchema,
   pickMessageSchema,
   pickResultSchema,
+  removeRequestSchema,
+  updateResultSchema,
 } from './rpc.js'
 
 const requestJsonSchema = {
@@ -43,6 +51,7 @@ const resultJsonSchema = {
   properties: {
     path: { type: 'string', description: 'Absolute path of the real combined workspace directory.' },
     title: { type: 'string', description: 'Durable Workspace title.' },
+    titleAuto: { type: 'boolean', description: 'Whether the title is derived from the current folders.' },
     workspaceId: { type: 'string', description: 'Durable Workspace id.' },
     created: { type: 'boolean', description: 'Whether this call materialized the workspace.' },
     links: {
@@ -56,7 +65,7 @@ const resultJsonSchema = {
     },
     sources: { type: 'array', items: { type: 'string' } },
   },
-  required: ['path', 'title', 'workspaceId', 'created', 'links', 'sources'],
+  required: ['path', 'title', 'titleAuto', 'workspaceId', 'created', 'links', 'sources'],
   additionalProperties: false,
   description: 'The materialized combined workspace directory and its durable registration.',
 } as const
@@ -156,6 +165,123 @@ const listingResultCodec: RemoteCodecSpec = {
   description: 'one directory level and its ancestry for the in-app browser.',
 }
 
+const linkJsonSchema = {
+  type: 'object',
+  properties: { name: { type: 'string' }, target: { type: 'string' } },
+  required: ['name', 'target'],
+  additionalProperties: false,
+} as const
+
+const infoJsonSchema = {
+  type: 'object',
+  properties: {
+    path: { type: 'string', description: 'Absolute path of the real combined workspace directory.' },
+    title: { type: 'string', description: 'Durable Workspace title.' },
+    titleAuto: { type: 'boolean', description: 'Whether the title is derived from the current folders.' },
+    members: { type: 'array', items: linkJsonSchema, description: 'Symlinks in the directory, in member order.' },
+    workspaceId: { type: 'string', description: 'Durable Workspace id, when the directory is registered.' },
+  },
+  required: ['path', 'title', 'titleAuto', 'members'],
+  additionalProperties: false,
+} as const
+
+const inspectParamJsonSchema = {
+  type: 'object',
+  properties: { path: { type: 'string', description: 'Absolute path of the directory to inspect.' } },
+  required: ['path'],
+  additionalProperties: false,
+} as const
+
+const addParamJsonSchema = {
+  type: 'object',
+  properties: {
+    path: { type: 'string', description: 'Absolute path of the combined workspace directory.' },
+    paths: {
+      type: 'array',
+      items: { type: 'string' },
+      minItems: 1,
+      maxItems: 64,
+      description: 'Absolute paths of the folders to link in.',
+    },
+  },
+  required: ['path', 'paths'],
+  additionalProperties: false,
+} as const
+
+const removeParamJsonSchema = {
+  type: 'object',
+  properties: {
+    path: { type: 'string', description: 'Absolute path of the combined workspace directory.' },
+    names: {
+      type: 'array',
+      items: { type: 'string' },
+      minItems: 1,
+      maxItems: 64,
+      description: 'Entry names to drop from the directory.',
+    },
+  },
+  required: ['path', 'names'],
+  additionalProperties: false,
+} as const
+
+const updateJsonSchema = {
+  type: 'object',
+  properties: {
+    path: { type: 'string', description: 'Absolute path of the real combined workspace directory.' },
+    title: { type: 'string', description: 'Durable Workspace title after the change.' },
+    titleAuto: { type: 'boolean', description: 'Whether the title is derived from the current folders.' },
+    members: { type: 'array', items: linkJsonSchema, description: 'Symlinks after the change.' },
+    changed: { type: 'array', items: linkJsonSchema, description: 'Members added or removed by this call.' },
+  },
+  required: ['path', 'title', 'titleAuto', 'members', 'changed'],
+  additionalProperties: false,
+} as const
+
+/** Strict parameter codec of inspect. */
+const inspectParamCodec: RemoteCodecSpec = {
+  mode: 'strict',
+  typeSymbol: `${PACKAGE_NAME}#WorkspaceInspectRequest`,
+  create: () => inspectRequestSchema,
+  jsonSchema: inspectParamJsonSchema,
+  description: 'the combined-workspace directory to describe.',
+}
+
+/** Strict result codec of inspect: null for a directory that is not a combined workspace. */
+const inspectResultCodec: RemoteCodecSpec = {
+  mode: 'strict',
+  typeSymbol: `${PACKAGE_NAME}#WorkspaceInfo`,
+  create: () => inspectResultSchema,
+  jsonSchema: { oneOf: [{ type: 'null' }, infoJsonSchema] },
+  description: 'the combined workspace, or null when the directory is not one.',
+}
+
+/** Strict parameter codec of addFolders. */
+const addParamCodec: RemoteCodecSpec = {
+  mode: 'strict',
+  typeSymbol: `${PACKAGE_NAME}#WorkspaceAddRequest`,
+  create: () => addRequestSchema,
+  jsonSchema: addParamJsonSchema,
+  description: 'the combined workspace and the folders to link into it.',
+}
+
+/** Strict parameter codec of removeFolders. */
+const removeParamCodec: RemoteCodecSpec = {
+  mode: 'strict',
+  typeSymbol: `${PACKAGE_NAME}#WorkspaceRemoveRequest`,
+  create: () => removeRequestSchema,
+  jsonSchema: removeParamJsonSchema,
+  description: 'the combined workspace and the member names to drop.',
+}
+
+/** Strict result codec of an add or remove. */
+const updateResultCodec: RemoteCodecSpec = {
+  mode: 'strict',
+  typeSymbol: `${PACKAGE_NAME}#WorkspaceUpdateResult`,
+  create: () => updateResultSchema,
+  jsonSchema: updateJsonSchema,
+  description: 'the combined workspace after the change.',
+}
+
 /**
  * Build the compiler-shaped Remote spec both faces publish.
  * @returns the Remote spec accepted by `createTypertRemoteInfo()`.
@@ -210,6 +336,54 @@ export function buildRemoteSpec(): RemoteSpec {
           },
         ],
         result: resultCodec,
+        sourceLocation: { file: 'src/host/index.ts', line: 1, column: 1 },
+      },
+      [INSPECT_ENDPOINT]: {
+        service: NAMESPACE,
+        description:
+          'Describe one combined workspace: its durable title, whether that title is still derived from the folders, and the symlinked members in order. Returns null when the directory holds no manifest.',
+        invocation: { kind: 'direct' },
+        parameters: [
+          {
+            name: 'request',
+            description: 'the combined-workspace directory to describe.',
+            source: 'json',
+            codec: inspectParamCodec,
+          },
+        ],
+        result: inspectResultCodec,
+        sourceLocation: { file: 'src/host/index.ts', line: 1, column: 1 },
+      },
+      [ADD_ENDPOINT]: {
+        service: NAMESPACE,
+        description:
+          'Append folders to an existing combined workspace: validate them, symlink them into the directory, rewrite the manifest, and recompute an automatic title. Removes the new links again when any step fails.',
+        invocation: { kind: 'direct' },
+        parameters: [
+          {
+            name: 'request',
+            description: 'the combined workspace and the folders to link into it.',
+            source: 'json',
+            codec: addParamCodec,
+          },
+        ],
+        result: updateResultCodec,
+        sourceLocation: { file: 'src/host/index.ts', line: 1, column: 1 },
+      },
+      [REMOVE_ENDPOINT]: {
+        service: NAMESPACE,
+        description:
+          'Remove folders from a combined workspace: drop their symlinks and manifest entries, never their directories, refuse to leave fewer than two members, and recompute an automatic title.',
+        invocation: { kind: 'direct' },
+        parameters: [
+          {
+            name: 'request',
+            description: 'the combined workspace and the member names to drop.',
+            source: 'json',
+            codec: removeParamCodec,
+          },
+        ],
+        result: updateResultCodec,
         sourceLocation: { file: 'src/host/index.ts', line: 1, column: 1 },
       },
     },

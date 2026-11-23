@@ -7,7 +7,15 @@
 import { z } from 'zod'
 import { createTypertRemoteInfo } from '../shared/remote-info.js'
 import { buildRemoteSpec } from '../shared/remote-spec.js'
-import { CREATE_METHOD, LIST_METHOD, NAMESPACE, PACKAGE_NAME } from '../shared/rpc.js'
+import {
+  ADD_METHOD,
+  CREATE_METHOD,
+  INSPECT_METHOD,
+  LIST_METHOD,
+  NAMESPACE,
+  PACKAGE_NAME,
+  REMOVE_METHOD,
+} from '../shared/rpc.js'
 
 const $remote = createTypertRemoteInfo(buildRemoteSpec(), z)
 
@@ -22,6 +30,15 @@ const pickJsDoc = `/**\n * Open the native macOS folder panel with multiple sele
 const listDescription =
   'List one directory level for the in-app browser: absolute child directories only, name-sorted, with hidden flags and ancestry.'
 const listJsDoc = `/**\n * List one directory level for the in-app browser.\n * @param path - absolute directory; null lists the host home directory.\n * @returns the bounded level and its ancestry.\n */`
+const inspectDescription =
+  'Describe one combined workspace: durable title, whether the title is still derived from the folders, and the symlinked members in order. Returns null when the directory holds no manifest.'
+const inspectJsDoc = `/**\n * Describe one combined workspace.\n * @param request - the directory to describe.\n * @returns the workspace, or null when the directory is not a combined workspace.\n */`
+const addDescription =
+  'Append folders to an existing combined workspace, symlink them in, rewrite the manifest, and recompute an automatic title.'
+const addJsDoc = `/**\n * Append folders to a combined workspace.\n * @param request - the workspace directory and the folders to link in.\n * @returns the updated workspace.\n */`
+const removeDescription =
+  'Remove folders from a combined workspace, dropping their links and manifest entries but never their directories, and refusing to leave fewer than two members.'
+const removeJsDoc = `/**\n * Remove folders from a combined workspace.\n * @param request - the workspace directory and the member names to drop.\n * @returns the updated workspace.\n */`
 
 /**
  * The generated-artifact-shaped manifest consumed by `@deepseek-ai/dsh-typert-loader`.
@@ -63,6 +80,27 @@ export const TYPERT = {
             signature: 'async create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateResult>',
             summary: createDescription,
             jsDoc: createJsDoc,
+          },
+          {
+            kind: 'method',
+            name: INSPECT_METHOD,
+            signature: 'async inspect(request: WorkspaceInspectRequest): Promise<WorkspaceInfo | null>',
+            summary: inspectDescription,
+            jsDoc: inspectJsDoc,
+          },
+          {
+            kind: 'method',
+            name: ADD_METHOD,
+            signature: 'async addFolders(request: WorkspaceAddRequest): Promise<WorkspaceUpdateResult>',
+            summary: addDescription,
+            jsDoc: addJsDoc,
+          },
+          {
+            kind: 'method',
+            name: REMOVE_METHOD,
+            signature: 'async removeFolders(request: WorkspaceRemoveRequest): Promise<WorkspaceUpdateResult>',
+            summary: removeDescription,
+            jsDoc: removeJsDoc,
           },
         ],
         types: [] as unknown[],

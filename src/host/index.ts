@@ -12,20 +12,36 @@
  *
  * @module dsh-multi-workspace/host
  */
+import { realpath } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 import { SelectionError } from './core.js'
-import { materializeWorkspace, removeWorkspaceDirectory } from './fs.js'
-import type { MaterializedWorkspace } from './fs.js'
+import {
+  addFolders,
+  materializeWorkspace,
+  readCombinedWorkspace,
+  removeFolders,
+  syncWorkspaceTitle,
+  removeWorkspaceDirectory,
+} from './fs.js'
+import type { EditedWorkspace, MaterializedWorkspace } from './fs.js'
 import { buildDirectoryListing, ListingError } from './listing.js'
 import { nativePanelBlocker, pickNativeDirectories } from './native-picker.js'
 import { registerCombinedWorkspaceGuidance, type SystemPromptLike } from './prompt.js'
 import type { DirectoryListing } from '../shared/listing.js'
 import {
   NAMESPACE,
+  addRequestSchema,
   createRequestSchema,
+  inspectRequestSchema,
+  removeRequestSchema,
+  type WorkspaceAddRequest,
   type WorkspaceCreateRequest,
   type WorkspaceCreateResult,
+  type WorkspaceInfo,
+  type WorkspaceInspectRequest,
+  type WorkspaceRemoveRequest,
+  type WorkspaceUpdateResult,
 } from '../shared/rpc.js'
 
 /** Configuration a composing row may pass to this plugin. */
@@ -40,6 +56,17 @@ interface HostContext {
   get(name: string): unknown
   /** Cordis dependency-aware registration (used for the runtime context hook). */
   inject(dependencies: string[], callback: (scope: unknown) => void): void
+  /** Cordis event subscription; absent in minimal test contexts. */
+  on?(event: 'domain/changed', listener: (change: DomainChangedLike) => void): () => void
+}
+
+/** One durable-domain change, as far as this plugin inspects it. */
+interface DomainChangedLike {
+  readonly domain?: unknown
+  readonly table?: unknown
+  readonly key?: unknown
+  readonly operation?: unknown
+  readonly value?: unknown
 }
 
 /** The WorkingDirectory service surface the context provider reads. */
@@ -52,11 +79,49 @@ interface WorkspaceEntityLike {
   readonly id: string
   readonly path: string
   readonly title: string
+  readonly sessionIds?: readonly string[]
+  setTitle?(title: string): Promise<void>
 }
 
 /** The Workspace registry service surface this plugin relies on. */
 interface WorkspaceRegistryLike {
   create(path: string, title?: string): Promise<WorkspaceEntityLike>
+  list(): readonly WorkspaceEntityLike[]
+  resolveByPath(path: string): Promise<WorkspaceEntityLike | undefined>
+}
+
+/** Table name of the Workspace domain records. */
+const WORKSPACE_TABLE = 'workspaces'
+
+/** Domain name of the Workspace registry records. */
+const WORKSPACE_DOMAIN = 'workspace'
+
+/**
+ * Read the Workspace registry when the composition provides it.
+ * @param ctx - Host plugin context.
+ * @returns the registry, or undefined in a composition without one.
+ */
+function registryOf(ctx: HostContext): WorkspaceRegistryLike | undefined {
+  const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+  return registry !== undefined && typeof registry.create === 'function' ? registry : undefined
+}
+
+/**
+ * Resolve the Workspace that owns a directory without creating one.
+ * @param registry - live registry.
+ * @param dir - absolute directory.
+ * @returns the owning entity, or undefined for an unowned or unreadable path.
+ */
+async function ownedWorkspace(
+  registry: WorkspaceRegistryLike | undefined,
+  dir: string,
+): Promise<WorkspaceEntityLike | undefined> {
+  if (registry === undefined || typeof registry.resolveByPath !== 'function') return undefined
+  try {
+    return await registry.resolveByPath(dir)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -114,10 +179,170 @@ export interface MultiWorkspaceService {
    * @returns the materialized directory and its durable registration.
    */
   create(request: WorkspaceCreateRequest): Promise<WorkspaceCreateResult>
+  /**
+   * Describe one combined workspace.
+   * @param request - directory to inspect.
+   * @returns the workspace, or null when the directory is not a combined workspace.
+   */
+  inspect(request: WorkspaceInspectRequest): Promise<WorkspaceInfo | null>
+  /**
+   * Append folders to a combined workspace.
+   * @param request - the directory and the folders to link in.
+   * @returns the updated workspace.
+   */
+  addFolders(request: WorkspaceAddRequest): Promise<WorkspaceUpdateResult>
+  /**
+   * Remove folders from a combined workspace, never touching their directories.
+   * @param request - the directory and the members to drop.
+   * @returns the updated workspace.
+   */
+  removeFolders(request: WorkspaceRemoveRequest): Promise<WorkspaceUpdateResult>
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Titles of the other registered workspaces, used when an edit recomputes an
+ * automatic title.
+ * @param ctx - Host plugin context.
+ * @returns the sibling titles, or an empty list without a registry.
+ */
+function siblingOptions(ctx: HostContext): { takenTitles: readonly string[] } {
+  const registry = registryOf(ctx)
+  if (registry === undefined || typeof registry.list !== 'function') return { takenTitles: [] }
+  try {
+    return { takenTitles: registry.list().map(workspace => workspace.title) }
+  } catch {
+    return { takenTitles: [] }
+  }
+}
+
+/**
+ * Run one membership edit, keep the durable Workspace title in step, and
+ * project the result onto the wire shape.
+ * @param ctx - Host plugin context.
+ * @param rootDir - combined-workspace root.
+ * @param run - the edit to perform.
+ * @returns the updated workspace.
+ * @throws {RemoteFailure} with the edit's rejection code.
+ */
+async function applyEdit(
+  ctx: HostContext,
+  rootDir: string,
+  run: () => Promise<EditedWorkspace>,
+): Promise<WorkspaceUpdateResult> {
+  let edited: EditedWorkspace
+  try {
+    edited = await run()
+  } catch (error) {
+    if (error instanceof SelectionError) {
+      throw new RemoteFailure('multi-workspace/invalid-selection', error.message, {
+        reason: error.code,
+      })
+    }
+    throw new RemoteFailure('multi-workspace/edit-failed', errorMessage(error))
+  }
+  const owner = await ownedWorkspace(registryOf(ctx), edited.workspace.dir)
+  if (owner !== undefined && typeof owner.setTitle === 'function' && owner.title !== edited.workspace.title) {
+    try {
+      await owner.setTitle(edited.workspace.title)
+    } catch (error) {
+      throw new RemoteFailure(
+        'multi-workspace/edit-failed',
+        `The folders changed, but the workspace title could not be updated: ${errorMessage(error)}`,
+      )
+    }
+  }
+  return {
+    path: edited.workspace.dir,
+    title: edited.workspace.title,
+    titleAuto: edited.workspace.titleAuto,
+    members: edited.workspace.links,
+    changed: edited.changed,
+  }
+}
+
+/**
+ * Follow Workspace-record deletions and drop the directory behind a workspace
+ * that never owned a Session. A directory whose workspace held Sessions is
+ * kept: those Sessions keep the path as their recorded cwd, and the directory
+ * is adopted again if the same folders are picked later.
+ * @param ctx - Host plugin context.
+ * @param rootDir - combined-workspace root.
+ */
+function registerDirectoryCleanup(ctx: HostContext, rootDir: string): void {
+  if (typeof ctx.on !== 'function') return
+  const known = new Map<string, { path: string; sessions: number }>()
+  const registry = registryOf(ctx)
+  if (registry !== undefined && typeof registry.list === 'function') {
+    try {
+      for (const workspace of registry.list()) {
+        known.set(String(workspace.id), {
+          path: workspace.path,
+          sessions: (workspace.sessionIds ?? []).length,
+        })
+      }
+    } catch {
+      // A registry that cannot list simply starts with no history.
+    }
+  }
+  ctx.on('domain/changed', change => {
+    if (change.domain !== WORKSPACE_DOMAIN || change.table !== WORKSPACE_TABLE) return
+    const key = typeof change.key === 'string' ? change.key : ''
+    if (key === '') return
+    if (change.operation === 'put') {
+      const record = change.value as {
+        path?: unknown
+        sessionIds?: unknown
+        title?: unknown
+      } | null
+      if (record === null || record === undefined || typeof record.path !== 'string') return
+      known.set(key, {
+        path: record.path,
+        sessions: Array.isArray(record.sessionIds) ? record.sessionIds.length : 0,
+      })
+      // The shipped Rename dialog writes the registry, not our manifest; keep
+      // the two in step so a later membership change cannot undo that rename.
+      if (typeof record.title === 'string' && record.title !== '') {
+        void syncWorkspaceTitle(record.path, record.title).catch(() => undefined)
+      }
+      return
+    }
+    if (change.operation !== 'deleted') return
+    const entry = known.get(key)
+    known.delete(key)
+    if (entry === undefined || entry.sessions > 0) return
+    void dropDirectory(rootDir, entry.path)
+  })
+}
+
+/**
+ * Remove one combined-workspace directory when it really is one under the root.
+ * @param rootDir - combined-workspace root.
+ * @param path - directory the deleted workspace pointed at.
+ */
+async function dropDirectory(rootDir: string, path: string): Promise<void> {
+  try {
+    // The record path is canonical, but the configured root may still carry a
+    // symlinked spelling (/var vs /private/var), so both forms are compared.
+    const roots = new Set<string>([resolve(rootDir)])
+    try {
+      roots.add(await realpath(resolve(rootDir)))
+    } catch {
+      // A missing root cannot contain the directory anyway.
+    }
+    const inside = [...roots].some(root => {
+      const prefix = root.endsWith(sep) ? root : `${root}${sep}`
+      return path === root || path.startsWith(prefix)
+    })
+    if (!inside) return
+    if ((await readCombinedWorkspace(path)) === null) return
+    await removeWorkspaceDirectory(path)
+  } catch {
+    // Best effort: a directory left behind is inert and gets adopted later.
+  }
 }
 
 /**
@@ -182,6 +407,7 @@ export function createMultiWorkspaceService(ctx: HostContext, rootDir: string): 
         )
       }
       const title = parsed.data.title
+      const registry = registryOf(ctx)
       let materialized: MaterializedWorkspace
       try {
         materialized = await materializeWorkspace({
@@ -198,8 +424,7 @@ export function createMultiWorkspaceService(ctx: HostContext, rootDir: string): 
         throw new RemoteFailure('multi-workspace/create-failed', errorMessage(error))
       }
 
-      const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
-      if (registry === undefined || typeof registry.create !== 'function') {
+      if (registry === undefined) {
         await removeWorkspaceDirectory(materialized.dir)
         throw new RemoteFailure(
           'multi-workspace/unavailable',
@@ -220,11 +445,52 @@ export function createMultiWorkspaceService(ctx: HostContext, rootDir: string): 
       return {
         path: workspace.path,
         title: workspace.title,
+        titleAuto: materialized.titleAuto,
         workspaceId: String(workspace.id),
-        created: true,
+        created: !materialized.adopted,
         links: materialized.links,
         sources: materialized.sources,
       }
+    },
+    async inspect(request: WorkspaceInspectRequest): Promise<WorkspaceInfo | null> {
+      const parsed = inspectRequestSchema.safeParse(request)
+      if (!parsed.success) {
+        throw new RemoteFailure('multi-workspace/invalid-request', 'The workspace path is not valid.', {
+          issues: parsed.error.issues.map(issue => issue.message),
+        })
+      }
+      const workspace = await readCombinedWorkspace(parsed.data.path)
+      if (workspace === null) return null
+      const owner = await ownedWorkspace(registryOf(ctx), workspace.dir)
+      return {
+        path: workspace.dir,
+        title: workspace.title,
+        titleAuto: workspace.titleAuto,
+        members: workspace.links,
+        ...(owner === undefined ? {} : { workspaceId: String(owner.id) }),
+      }
+    },
+    async addFolders(request: WorkspaceAddRequest): Promise<WorkspaceUpdateResult> {
+      const parsed = addRequestSchema.safeParse(request)
+      if (!parsed.success) {
+        throw new RemoteFailure('multi-workspace/invalid-request', 'The folder selection is not valid.', {
+          issues: parsed.error.issues.map(issue => issue.message),
+        })
+      }
+      return await applyEdit(ctx, rootDir, () =>
+        addFolders(parsed.data.path, parsed.data.paths, { rootDir, ...siblingOptions(ctx) }),
+      )
+    },
+    async removeFolders(request: WorkspaceRemoveRequest): Promise<WorkspaceUpdateResult> {
+      const parsed = removeRequestSchema.safeParse(request)
+      if (!parsed.success) {
+        throw new RemoteFailure('multi-workspace/invalid-request', 'The member selection is not valid.', {
+          issues: parsed.error.issues.map(issue => issue.message),
+        })
+      }
+      return await applyEdit(ctx, rootDir, () =>
+        removeFolders(parsed.data.path, parsed.data.names, { rootDir, ...siblingOptions(ctx) }),
+      )
     },
     typertRemote: undefined as unknown as MultiWorkspaceService['typertRemote'],
   } as MultiWorkspaceService
@@ -248,6 +514,7 @@ export function apply(context: unknown, config?: MultiWorkspaceConfig): void {
   const rootDir = resolveWorkspaceRoot(config?.rootDir)
   const service = createMultiWorkspaceService(ctx, rootDir)
   ctx.provide(NAMESPACE, service)
+  registerDirectoryCleanup(ctx, rootDir)
 
   // Tell the model how the built-in worktree, search, and sandbox behavior
   // differs inside a combined workspace. The provider only contributes text for

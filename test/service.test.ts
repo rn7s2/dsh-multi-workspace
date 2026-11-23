@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, realpath, rm, stat } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createMultiWorkspaceService } from '../src/host/index.js'
+import { apply as applyHost, createMultiWorkspaceService } from '../src/host/index.js'
+import { isUuid } from '../src/shared/uuid.js'
 
 let base: string
 
@@ -86,5 +87,244 @@ describe('multiWorkspace service create validation', () => {
       code: 'multi-workspace/invalid-selection',
       details: { reason: 'too-few-paths' },
     })
+  })
+})
+
+/** One in-memory Workspace record used by the fake registry. */
+interface FakeRecord {
+  id: string
+  path: string
+  title: string
+  sessionIds: string[]
+  setTitle(title: string): Promise<void>
+}
+
+/**
+ * Build a registry stub that behaves like the durable one for these paths.
+ * @returns the stub plus the records it holds.
+ */
+function makeRegistry(): {
+  records: FakeRecord[]
+  registry: {
+    create(path: string, title?: string): Promise<FakeRecord>
+    list(): FakeRecord[]
+    resolveByPath(path: string): Promise<FakeRecord | undefined>
+  }
+} {
+  const records: FakeRecord[] = []
+  let counter = 0
+  return {
+    records,
+    registry: {
+      async create(path, title) {
+        const canonical = await realpath(path)
+        const existing = records.find(record => record.path === canonical)
+        if (existing !== undefined) return existing
+        counter += 1
+        const record: FakeRecord = {
+          id: `ws-${counter}`,
+          path: canonical,
+          title: title ?? resolve(path),
+          sessionIds: [],
+          async setTitle(next) {
+            record.title = next
+          },
+        }
+        records.push(record)
+        return record
+      },
+      list() {
+        return [...records]
+      },
+      async resolveByPath(path) {
+        const canonical = await realpath(path).catch(() => resolve(path))
+        return records.find(record => record.path === canonical)
+      },
+    },
+  }
+}
+
+/**
+ * Build a service whose context exposes one registry.
+ * @param rootDir - combined-workspace root.
+ * @param registry - registry stub, or undefined for a composition without one.
+ */
+function makeServiceWithRegistry(
+  rootDir: string,
+  registry: ReturnType<typeof makeRegistry>['registry'] | undefined,
+): ReturnType<typeof createMultiWorkspaceService> {
+  const services = new Map<string, unknown>([['workspaceRegistry', registry]])
+  return createMultiWorkspaceService({ get: (name: string) => services.get(name) } as never, rootDir)
+}
+
+describe('multiWorkspace service create', () => {
+  it('registers a UUID directory and reports the derived title as automatic', async () => {
+    const rootDir = join(base, 'workspaces')
+    const { registry } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+
+    const result = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+
+    expect(isUuid(basename(result.path))).toBe(true)
+    expect(result.title).toBe('alpha and beta')
+    expect(result.titleAuto).toBe(true)
+    expect(result.created).toBe(true)
+    expect(result.workspaceId).toBe('ws-1')
+    expect(result.links.map(link => link.name)).toEqual(['alpha', 'beta'])
+  })
+
+  it('adopts the same directory on a repeat pick instead of doubling it', async () => {
+    const rootDir = join(base, 'workspaces')
+    const { registry } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+    const paths = [join(base, 'alpha'), join(base, 'beta')]
+
+    const first = await service.create({ paths })
+    const second = await service.create({ paths })
+
+    expect(second.path).toBe(first.path)
+    expect(second.created).toBe(false)
+    expect((await readdir(rootDir)).length).toBe(1)
+  })
+})
+
+describe('multiWorkspace service inspect', () => {
+  it('returns null for a directory without a manifest', async () => {
+    const service = makeServiceWithRegistry(join(base, 'workspaces'), makeRegistry().registry)
+    await expect(service.inspect({ path: join(base, 'alpha') })).resolves.toBeNull()
+  })
+
+  it('describes a combined workspace and its registration', async () => {
+    const rootDir = join(base, 'workspaces')
+    const { registry } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+    const created = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+
+    const info = await service.inspect({ path: created.path })
+
+    expect(info).toMatchObject({
+      path: created.path,
+      title: 'alpha and beta',
+      titleAuto: true,
+      workspaceId: created.workspaceId,
+    })
+    expect(info?.members.map(member => member.name)).toEqual(['alpha', 'beta'])
+  })
+})
+
+describe('multiWorkspace service edits', () => {
+  it('adds a folder and retitles the registered workspace', async () => {
+    await mkdir(join(base, 'gamma'), { recursive: true })
+    const rootDir = join(base, 'workspaces')
+    const { registry, records } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+    const created = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+
+    const updated = await service.addFolders({ path: created.path, paths: [join(base, 'gamma')] })
+
+    expect(updated.title).toBe('alpha, beta and gamma')
+    expect(updated.members.map(member => member.name)).toEqual(['alpha', 'beta', 'gamma'])
+    expect(updated.changed.map(member => member.name)).toEqual(['gamma'])
+    expect(records[0]?.title).toBe('alpha, beta and gamma')
+  })
+
+  it('removes a folder and keeps the durable title in step', async () => {
+    await mkdir(join(base, 'gamma'), { recursive: true })
+    const rootDir = join(base, 'workspaces')
+    const { registry, records } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+    const created = await service.create({
+      paths: [join(base, 'alpha'), join(base, 'beta'), join(base, 'gamma')],
+    })
+
+    const updated = await service.removeFolders({ path: created.path, names: ['beta'] })
+
+    expect(updated.members.map(member => member.name)).toEqual(['alpha', 'gamma'])
+    expect(updated.title).toBe('alpha and gamma')
+    expect(records[0]?.title).toBe('alpha and gamma')
+    expect((await stat(join(base, 'beta'))).isDirectory()).toBe(true)
+  })
+
+  it('maps the member floor to a stable Remote failure', async () => {
+    const service = makeServiceWithRegistry(join(base, 'workspaces'), makeRegistry().registry)
+    const created = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+
+    await expect(service.removeFolders({ path: created.path, names: ['beta'] })).rejects.toMatchObject({
+      code: 'multi-workspace/invalid-selection',
+      details: { reason: 'too-few-members' },
+    })
+  })
+
+  it('rejects a directory that is not a combined workspace', async () => {
+    const service = makeServiceWithRegistry(join(base, 'workspaces'), makeRegistry().registry)
+    await expect(
+      service.addFolders({ path: join(base, 'alpha'), paths: [join(base, 'beta')] }),
+    ).rejects.toMatchObject({
+      code: 'multi-workspace/invalid-selection',
+      details: { reason: 'not-combined' },
+    })
+  })
+})
+
+describe('combined-workspace cleanup', () => {
+  /**
+   * Apply the plugin over a context that records the domain listener.
+   * @param rootDir - combined-workspace root.
+   * @param registry - registry stub.
+   */
+  function applyPlugin(
+    rootDir: string,
+    registry: ReturnType<typeof makeRegistry>['registry'],
+  ): (change: Record<string, unknown>) => void {
+    const services = new Map<string, unknown>([['workspaceRegistry', registry]])
+    let listener: ((change: Record<string, unknown>) => void) | undefined
+    const ctx = {
+      get: (name: string) => services.get(name),
+      provide: () => () => undefined,
+      inject: () => undefined,
+      on: (_event: string, callback: (change: Record<string, unknown>) => void) => {
+        listener = callback
+        return () => undefined
+      },
+    }
+    applyHost(ctx as never, { rootDir })
+    return change => {
+      if (listener === undefined) throw new Error('the plugin did not subscribe to the domain')
+      listener(change)
+    }
+  }
+
+  it('drops the directory of a workspace that never owned a session', async () => {
+    const rootDir = join(base, 'workspaces')
+    const { registry, records } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+    const created = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+    const fire = applyPlugin(rootDir, registry)
+
+    fire({ domain: 'workspace', table: 'workspaces', key: records[0]?.id, operation: 'put', value: records[0] })
+    fire({ domain: 'workspace', table: 'workspaces', key: records[0]?.id, operation: 'deleted' })
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+
+    await expect(stat(created.path)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('keeps the directory of a workspace that owned a session', async () => {
+    const rootDir = join(base, 'workspaces')
+    const { registry, records } = makeRegistry()
+    const service = makeServiceWithRegistry(rootDir, registry)
+    const created = await service.create({ paths: [join(base, 'alpha'), join(base, 'beta')] })
+    const fire = applyPlugin(rootDir, registry)
+
+    fire({
+      domain: 'workspace',
+      table: 'workspaces',
+      key: records[0]?.id,
+      operation: 'put',
+      value: { ...records[0], sessionIds: ['session-1'] },
+    })
+    fire({ domain: 'workspace', table: 'workspaces', key: records[0]?.id, operation: 'deleted' })
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+
+    expect((await stat(created.path)).isDirectory()).toBe(true)
   })
 })

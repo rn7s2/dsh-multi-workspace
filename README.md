@@ -20,12 +20,18 @@ can read, edit, and run commands across all of them.
   host's screen.
 - **One workspace, all folders.** The workspace is a real directory whose entries are symlinks to
   your folders, so `alpha/` and `beta/` sit side by side in the same session.
-- **Hands-off naming.** Workspaces are named after your folders: `alpha`, `alpha and beta`,
-  `alpha, beta and gamma`; the real directory gets a tidy ASCII slug such as `alpha-beta`.
+- **Edit the member list later.** A combined workspace's **⋯** menu gains **Add folders…** and
+  **Remove folders…** beside the shipped Rename and Delete rows. Adding uses the same picker;
+  removing lists the members and refuses to go below two folders. Only links change — the folders
+  on disk are never touched.
+- **Stable identity, honest name.** The real directory is named after a time-ordered (v7) UUID, so
+  it never changes when the member list does and `ls` stays in creation order. The sidebar title is
+  still derived from the folders — `alpha and beta`, `alpha, beta and gamma` — and is recomputed
+  automatically after an edit. A title you renamed yourself is left alone.
 - **Single folder stays stock.** Pick one folder and nothing special happens: it opens directly,
   exactly like the built-in picker.
-- **Nothing is moved, copied, or deleted.** Only symlinks are created; removing the workspace
-  never touches your folders.
+- **Nothing is moved, copied, or deleted.** Only symlinks are created; removing the workspace or a
+  member never touches your folders.
 
 ## Install
 
@@ -68,8 +74,18 @@ note for combined workspaces; the essentials:
 
 ## Details
 
-- Workspaces live under `~/.dsh/multi-workspaces/<slug>`; each contains a hidden
-  `.dsh-multi-workspace.json` describing its links.
+- Workspaces live under `~/.dsh/multi-workspaces/<uuid-v7>`; each contains a hidden
+  `.dsh-multi-workspace.json` recording its id, title, whether that title is automatic, and its
+  links. Manifests written before this identity change are still read: the directory name is taken
+  as the id and the title is treated as derived.
+- Picking exactly the folders that an existing directory already holds reuses that directory instead
+  of allocating a second one — including a directory whose workspace was deleted, provided that
+  workspace never owned a session.
+- Deleting a workspace removes its directory only when no session ever attached to it; otherwise the
+  directory and its links survive, because those sessions keep that path as their recorded cwd. A
+  title renamed through the shipped dialog is written back into the manifest, so a later add or
+  remove cannot undo it.
+- Two workspaces that would derive the same title get ` (2)`, ` (3)`, … in the automatic case.
 - Override the root with the plugin row's `config.rootDir` (absolute path).
 - Duplicate folder names get `-2`, `-3`, … on the symlink; the display title keeps the plain
   folder names.

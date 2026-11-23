@@ -1,19 +1,13 @@
 /**
- * Pure planning rules and the error taxonomy used while creating a combined
- * workspace. Everything here is filesystem-free so the same rules can be unit
- * tested without a temporary directory; the filesystem side lives in
+ * Pure planning rules and the error taxonomy used while creating or editing a
+ * combined workspace. Everything here is filesystem-free so the same rules can
+ * be unit tested without a temporary directory; the filesystem side lives in
  * `./fs.ts`.
  *
  * @module dsh-multi-workspace/host/core
  */
-import type { WorkspaceLink } from '../shared/rpc.js'
-import {
-  assignLinkNames,
-  basenameOf,
-  deriveTitleFromPaths,
-  slugFromFolderNames,
-  slugify,
-} from '../shared/naming.js'
+import { MANIFEST_FILE, type WorkspaceLink } from '../shared/rpc.js'
+import { assignLinkNames, basenameOf, deriveTitleFromPaths } from '../shared/naming.js'
 
 /** Stable reason a selection or a materialization attempt was rejected. */
 export type SelectionErrorCode =
@@ -27,6 +21,10 @@ export type SelectionErrorCode =
   | 'inside-workspace-root'
   | 'root-unavailable'
   | 'materialize-failed'
+  | 'not-combined'
+  | 'member-unknown'
+  | 'too-few-members'
+  | 'last-member'
 
 /**
  * Rejection raised by the Host selection and materialization pipeline.
@@ -48,8 +46,8 @@ export class SelectionError extends Error {
 export interface SelectionPlan {
   /** Durable Workspace title: explicit override or the derived "A, B and C" name. */
   title: string
-  /** Lower-case directory segment before uniqueness suffixes. */
-  slug: string
+  /** Whether {@link SelectionPlan.title} is derived from the folders (and so may be recomputed). */
+  titleAuto: boolean
   /** Source directories in selection order (canonicalized by the caller). */
   sources: string[]
   /** Symlink entries to create, in the same order as {@link sources}. */
@@ -60,39 +58,71 @@ export interface SelectionPlan {
  * Build the immutable description of a combined workspace.
  * @param sources - absolute source directories in selection order.
  * @param options - optional explicit title; blank titles fall back to the derived one.
- * @returns the title, slug, sources, and link names.
+ * @returns the title, its provenance, sources, and link names.
  */
 export function buildPlan(sources: readonly string[], options?: { title?: string }): SelectionPlan {
   const override = options?.title?.trim()
+  const titleAuto = override === undefined || override === ''
   const names = sources.map(basenameOf)
-  const title =
-    override !== undefined && override !== '' ? override : deriveTitleFromPaths(sources)
-  const slug =
-    override !== undefined && override !== '' ? slugify(override) : slugFromFolderNames(names)
-  const linkNames = assignLinkNames(names)
+  const title = titleAuto ? deriveTitleFromPaths(sources) : (override as string)
+  // The manifest's own name is never available as a member entry.
+  const linkNames = assignLinkNames(names, [MANIFEST_FILE])
   const links = linkNames.map((name, index) => ({ name, target: sources[index] as string }))
-  return { title, slug, sources: [...sources], links }
+  return { title, titleAuto, sources: [...sources], links }
 }
 
-/** Lowest numeric disambiguation suffix appended to a taken slug. */
-const FIRST_SUFFIX = 2
+/**
+ * Plan the symlinks one add operation appends. Names are kept unique against
+ * the entries already in the directory, so a second `src` becomes `src-2`.
+ * @param existing - links already present, in their current order.
+ * @param sources - canonical directories to append, in the operator's pick order.
+ * @returns the new links, in the same order as {@link sources}.
+ */
+export function planAddition(
+  existing: readonly WorkspaceLink[],
+  sources: readonly string[],
+): WorkspaceLink[] {
+  const names = assignLinkNames(sources.map(basenameOf), [
+    MANIFEST_FILE,
+    ...existing.map(link => link.name),
+  ])
+  return names.map((name, index) => ({ name, target: sources[index] as string }))
+}
 
-/** Highest numeric disambiguation suffix tried before falling back to a timestamp. */
-const LAST_SUFFIX = 999
+/** One completed removal plan. */
+export interface RemovalPlan {
+  /** Links that stay, in their original order. */
+  remaining: WorkspaceLink[]
+  /** Links that the removal drops. */
+  removed: WorkspaceLink[]
+}
 
 /**
- * Pick the first free directory name for a slug.
- * Tries the slug itself, then `-2` through `-999`, and finally a timestamped
- * name. The caller owns the filesystem probe so this stays a pure function.
- * @param slug - slugified title.
- * @param taken - returns true when the candidate name is already in use.
- * @returns an unused directory name.
+ * Plan a removal by entry name, refusing to leave fewer than two members.
+ * @param existing - links currently in the directory.
+ * @param names - entry names to drop.
+ * @param minMembers - fewest members that may remain.
+ * @returns the surviving and removed links.
+ * @throws {SelectionError} `member-unknown` or `too-few-members`.
  */
-export function uniqueDirectoryName(slug: string, taken: (candidate: string) => boolean): string {
-  if (!taken(slug)) return slug
-  for (let suffix = FIRST_SUFFIX; suffix <= LAST_SUFFIX; suffix += 1) {
-    const candidate = `${slug}-${suffix}`
-    if (!taken(candidate)) return candidate
+export function planRemoval(
+  existing: readonly WorkspaceLink[],
+  names: readonly string[],
+  minMembers: number,
+): RemovalPlan {
+  const wanted = new Set(names)
+  for (const name of wanted) {
+    if (!existing.some(link => link.name === name)) {
+      throw new SelectionError('member-unknown', `"${name}" is not a folder of this workspace.`)
+    }
   }
-  return `${slug}-${Date.now()}`
+  const removed = existing.filter(link => wanted.has(link.name))
+  const remaining = existing.filter(link => !wanted.has(link.name))
+  if (remaining.length < minMembers) {
+    throw new SelectionError(
+      'too-few-members',
+      `A combined workspace needs at least ${minMembers} folders; remove at most ${existing.length - minMembers}.`,
+    )
+  }
+  return { remaining, removed }
 }

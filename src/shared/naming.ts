@@ -5,9 +5,6 @@
  * @module dsh-multi-workspace/shared/naming
  */
 
-/** Longest slug (directory segment) the plugin produces, before uniqueness suffixes. */
-export const MAX_SLUG_LENGTH = 60
-
 /** Hard cap of folders one combined workspace may contain. */
 export const HARD_MAX_PATHS = 64
 
@@ -44,22 +41,6 @@ export function deriveTitle(names: readonly string[]): string {
 }
 
 /**
- * Lower-case ASCII slug used as the real combined-workspace directory name.
- * @param title - source text (usually the derived title).
- * @returns `[a-z0-9-]+`, at most {@link MAX_SLUG_LENGTH} characters, never empty.
- */
-export function slugify(title: string): string {
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-{2,}/g, '-')
-  if (slug === '') return 'workspace'
-  if (slug.length <= MAX_SLUG_LENGTH) return slug
-  return slug.slice(0, MAX_SLUG_LENGTH).replace(/-+$/g, '') || 'workspace'
-}
-
-/**
  * Make one source folder name safe as a directory entry inside the combined
  * workspace: separators and control characters are replaced, and `.`/`..` are
  * never produced.
@@ -79,10 +60,11 @@ export function sanitizeLinkName(name: string): string {
  * case-insensitive because the common host filesystems are; the first
  * occurrence keeps its name, later collisions get `-2`, `-3`, ...
  * @param folderNames - folder names in selection order (already sanitized or not).
+ * @param taken - entry names already used by the workspace, kept untouched.
  * @returns entry names in the same order.
  */
-export function assignLinkNames(folderNames: readonly string[]): string[] {
-  const used = new Set<string>()
+export function assignLinkNames(folderNames: readonly string[], taken: readonly string[] = []): string[] {
+  const used = new Set(taken.map(name => name.toLowerCase()))
   const names: string[] = []
   for (const raw of folderNames) {
     const base = sanitizeLinkName(raw)
@@ -108,15 +90,33 @@ export function deriveTitleFromPaths(paths: readonly string[]): string {
   return deriveTitle(paths.map(basenameOf))
 }
 
+
 /**
- * Directory slug for the auto-derived name: the folder names joined with `-`
- * and slugified, so the `,`/` and ` connectives of the display title never
- * leak into the real directory name (`alpha-beta-gamma`, not
- * `alpha-beta-and-gamma`). A selection with no ASCII folder name falls back to
- * `workspace`.
- * @param folderNames - folder display names in selection order.
- * @returns a `[a-z0-9-]+` slug.
+ * Whether a title is still the automatic one derived from its folders. A title
+ * that differs was chosen by the operator and must survive membership changes.
+ * @param title - stored Workspace title.
+ * @param paths - current member folders.
+ * @returns true when the title can be recomputed safely.
  */
-export function slugFromFolderNames(folderNames: readonly string[]): string {
-  return slugify(folderNames.join('-'))
+export function isDerivedTitle(title: string, paths: readonly string[]): boolean {
+  if (paths.length === 0) return false
+  return title === deriveTitleFromPaths(paths)
+}
+
+/**
+ * Make an automatic title unique among the Workspace titles already in use.
+ * Different folders may share base names, and shared titles make the sidebar
+ * ambiguous, so later duplicates get a ` (2)`, ` (3)`, ... suffix.
+ * @param desired - fresh title derived from the members.
+ * @param taken - titles of every other Workspace.
+ * @returns `desired`, or its first free suffixed variant.
+ */
+export function uniqueTitle(desired: string, taken: readonly string[]): string {
+  const used = new Set(taken)
+  if (!used.has(desired)) return desired
+  for (let suffix = 2; suffix <= 999; suffix += 1) {
+    const candidate = `${desired} (${suffix})`
+    if (!used.has(candidate)) return candidate
+  }
+  return `${desired} (${Date.now()})`
 }

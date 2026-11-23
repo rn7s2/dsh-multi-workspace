@@ -1,19 +1,29 @@
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SelectionError } from '../src/host/core.js'
 import type { SelectionErrorCode } from '../src/host/core.js'
-import { materializeWorkspace, removeWorkspaceDirectory, resolveSources } from '../src/host/fs.js'
+import {
+  addFolders,
+  materializeWorkspace,
+  readCombinedWorkspace,
+  removeFolders,
+  removeWorkspaceDirectory,
+  resolveSources,
+} from '../src/host/fs.js'
 import { HARD_MAX_PATHS } from '../src/shared/naming.js'
 import { MANIFEST_FILE } from '../src/shared/rpc.js'
+import { isUuid } from '../src/shared/uuid.js'
 
 /** Parsed shape of the hidden manifest written by the Host. */
 interface Manifest {
   version: number
   kind: string
+  id: string
   createdAt: string
   title: string
+  titleAuto: boolean
   links: { name: string; target: string }[]
 }
 
@@ -171,15 +181,19 @@ describe('resolveSources validation', () => {
 })
 
 describe('materializeWorkspace', () => {
-  it('creates a missing root, symlinks, and a manifest', async () => {
+  it('creates a missing root, a UUID directory, symlinks, and a v2 manifest', async () => {
     const alpha = await makeSource('alpha')
     const beta = await makeSource('beta')
     const expectedSources = [await realpath(alpha), await realpath(beta)]
 
     const result = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
 
-    expect(result.dir).toBe(join(resolve(rootDir), 'alpha-beta'))
+    expect(isUuid(basename(result.dir))).toBe(true)
+    expect(result.dir).toBe(join(resolve(rootDir), basename(result.dir)))
+    expect(result.id).toBe(basename(result.dir))
     expect(result.title).toBe('alpha and beta')
+    expect(result.titleAuto).toBe(true)
+    expect(result.adopted).toBe(false)
     expect(result.sources).toEqual(expectedSources)
     expect(result.links).toEqual([
       { name: 'alpha', target: expectedSources[0] },
@@ -196,11 +210,28 @@ describe('materializeWorkspace', () => {
     }
 
     const manifest = await readManifest(result.dir)
-    expect(manifest.version).toBe(1)
+    expect(manifest.version).toBe(2)
     expect(manifest.kind).toBe('dsh-multi-workspace')
+    expect(manifest.id).toBe(result.id)
     expect(manifest.title).toBe('alpha and beta')
+    expect(manifest.titleAuto).toBe(true)
     expect(manifest.links).toEqual(result.links)
     expect(new Date(manifest.createdAt).toISOString()).toBe(manifest.createdAt)
+  })
+
+  it('names each new directory after a time-ordered UUID, never after the folders', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const first = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    const otherRoot = join(base, 'other-root')
+    const second = await materializeWorkspace({ rootDir: otherRoot, paths: [alpha, beta] })
+
+    expect(first.dir).not.toBe(second.dir)
+    expect(isUuid(basename(first.dir))).toBe(true)
+    expect(isUuid(basename(second.dir))).toBe(true)
+    // Version 7 keeps creation order in the lexicographic order of the names.
+    expect(basename(first.dir) < basename(second.dir)).toBe(true)
+    expect(basename(first.dir)).not.toContain('alpha')
   })
 
   it('suffixes symlink names when different parents share a basename', async () => {
@@ -223,33 +254,17 @@ describe('materializeWorkspace', () => {
     })
   })
 
-  it('allocates a -2 directory when the slug directory already exists', async () => {
+  it('never uses the manifest name as a member entry', async () => {
     const alpha = await makeSource('alpha')
-    const beta = await makeSource('beta')
-    await mkdir(rootDir, { recursive: true })
-    const taken = join(rootDir, 'alpha-beta')
-    await mkdir(taken)
-    await writeFile(join(taken, 'marker.txt'), 'keep me')
+    const decoy = await makeSource(MANIFEST_FILE)
 
-    const result = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    const result = await materializeWorkspace({ rootDir, paths: [alpha, decoy] })
 
-    expect(result.dir).toBe(join(resolve(rootDir), 'alpha-beta-2'))
-    expect(await readFile(join(taken, 'marker.txt'), 'utf8')).toBe('keep me')
-    expect((await readdir(rootDir)).sort()).toEqual(['alpha-beta', 'alpha-beta-2'])
+    expect(result.links.map(link => link.name)).toEqual(['alpha', `${MANIFEST_FILE}-2`])
+    expect((await readManifest(result.dir)).links).toEqual(result.links)
   })
 
-  it('allocates a -2 directory when a dangling symlink occupies the slug', async () => {
-    const alpha = await makeSource('alpha')
-    const beta = await makeSource('beta')
-    await mkdir(rootDir, { recursive: true })
-    await symlink(join(base, 'nowhere'), join(rootDir, 'alpha-beta'), 'dir')
-
-    const result = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
-
-    expect(result.dir).toBe(join(resolve(rootDir), 'alpha-beta-2'))
-  })
-
-  it('honours an explicit title for the directory and the manifest', async () => {
+  it('keeps an explicit title and marks it manual', async () => {
     const alpha = await makeSource('alpha')
     const beta = await makeSource('beta')
 
@@ -260,8 +275,49 @@ describe('materializeWorkspace', () => {
     })
 
     expect(result.title).toBe('Product Docs')
-    expect(result.dir).toBe(join(resolve(rootDir), 'product-docs'))
-    expect((await readManifest(result.dir)).title).toBe('Product Docs')
+    expect(result.titleAuto).toBe(false)
+    expect(isUuid(basename(result.dir))).toBe(true)
+    expect(await readManifest(result.dir)).toMatchObject({ title: 'Product Docs', titleAuto: false })
+  })
+
+  it('adopts an unowned directory holding the same folders instead of doubling it', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const first = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    const before = await readManifest(first.dir)
+
+    const again = await materializeWorkspace({ rootDir, paths: [beta, alpha], })
+
+    expect(again.dir).toBe(first.dir)
+    expect(again.adopted).toBe(true)
+    expect(again.id).toBe(first.id)
+    expect((await readdir(rootDir)).length).toBe(1)
+    expect((await readManifest(again.dir)).createdAt).toBe(before.createdAt)
+  })
+
+  it('repairs a missing link when it adopts a directory', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const first = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    await rm(join(first.dir, 'beta'))
+
+    const again = await materializeWorkspace({ rootDir, paths: [alpha, beta], })
+
+    expect(again.dir).toBe(first.dir)
+    expect((await lstat(join(again.dir, 'beta'))).isSymbolicLink()).toBe(true)
+  })
+
+  it('creates a second directory when the member set differs', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const first = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
+    const second = await materializeWorkspace({ rootDir, paths: [alpha, gamma] })
+
+    expect(second.dir).not.toBe(first.dir)
+    expect(second.adopted).toBe(false)
+    expect((await readdir(rootDir)).length).toBe(2)
   })
 
   it('rejects a single folder by default but supports minPaths: 1', async () => {
@@ -306,22 +362,216 @@ describe('materializeWorkspace', () => {
       await expect(readdir(rootDir)).resolves.toEqual([])
     },
   )
+})
 
-  it('removes a partially created directory when a later step fails', async () => {
-    // A selected folder named like the manifest makes the manifest write fail
-    // (the entry is a symlink to a directory, so writing through it is EISDIR).
-    const alpha = await makeSource('alpha')
-    const manifestNameSource = await makeSource(MANIFEST_FILE)
+describe('readCombinedWorkspace', () => {
+  it('returns null for a directory without a manifest', async () => {
+    const plain = await makeSource('plain')
+    await expect(readCombinedWorkspace(plain)).resolves.toBeNull()
+  })
 
-    const error = await expectSelectionError(
-      () => materializeWorkspace({ rootDir, paths: [alpha, manifestNameSource] }),
-      'materialize-failed',
+  it('returns null for an unreadable or foreign manifest', async () => {
+    const dir = await makeSource('foreign')
+    await writeFile(join(dir, MANIFEST_FILE), '{"kind":"other"}')
+    await expect(readCombinedWorkspace(dir)).resolves.toBeNull()
+  })
+
+  it('reads a pre-UUID manifest and treats its title as derived', async () => {
+    const dir = await makeSource('legacy')
+    await writeFile(
+      join(dir, MANIFEST_FILE),
+      JSON.stringify({
+        version: 1,
+        kind: 'dsh-multi-workspace',
+        createdAt: '2026-10-26T00:00:00.000Z',
+        title: 'alpha and beta',
+        links: [
+          { name: 'alpha', target: '/src/alpha' },
+          { name: 'beta', target: '/src/beta' },
+        ],
+      }),
     )
-    expect(error.message).toContain(rootDir)
-    expect((await stat(rootDir)).isDirectory()).toBe(true)
-    await expect(readdir(rootDir)).resolves.toEqual([])
-    expect((await stat(alpha)).isDirectory()).toBe(true)
-    expect((await stat(manifestNameSource)).isDirectory()).toBe(true)
+
+    const workspace = await readCombinedWorkspace(dir)
+
+    expect(workspace).toMatchObject({
+      id: 'legacy',
+      title: 'alpha and beta',
+      titleAuto: true,
+      createdAt: '2026-10-26T00:00:00.000Z',
+    })
+  })
+})
+
+describe('addFolders', () => {
+  it('links the new folders, keeps manifest order, and recomputes the title', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
+    const { workspace, changed } = await addFolders(created.dir, [gamma], { rootDir })
+
+    expect(changed).toEqual([{ name: 'gamma', target: await realpath(gamma) }])
+    expect(workspace.links.map(link => link.name)).toEqual(['alpha', 'beta', 'gamma'])
+    expect(workspace.title).toBe('alpha, beta and gamma')
+    expect(workspace.titleAuto).toBe(true)
+    expect((await lstat(join(created.dir, 'gamma'))).isSymbolicLink()).toBe(true)
+    expect(await readManifest(created.dir)).toMatchObject({
+      title: 'alpha, beta and gamma',
+      links: workspace.links,
+    })
+  })
+
+  it('suffixes a name that the workspace already uses', async () => {
+    const first = await makeSource('first', 'docs')
+    const second = await makeSource('second', 'docs')
+    const third = await makeSource('third', 'docs')
+    const created = await materializeWorkspace({ rootDir, paths: [first, second] })
+
+    const { changed } = await addFolders(created.dir, [third], { rootDir })
+
+    expect(changed).toEqual([{ name: 'docs-3', target: await realpath(third) }])
+  })
+
+  it('keeps a manual title through a membership change', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta], title: 'Product Docs' })
+
+    const { workspace } = await addFolders(created.dir, [gamma], { rootDir })
+
+    expect(workspace.title).toBe('Product Docs')
+    expect(workspace.titleAuto).toBe(false)
+    expect((await readManifest(created.dir)).titleAuto).toBe(false)
+  })
+
+  it('suffixes an automatic title another workspace already uses', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
+    const { workspace } = await addFolders(created.dir, [gamma], {
+      rootDir,
+      takenTitles: ['alpha, beta and gamma'],
+    })
+
+    expect(workspace.title).toBe('alpha, beta and gamma (2)')
+  })
+
+  it('rejects a folder that is already a member', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
+    await expectSelectionError(() => addFolders(created.dir, [alpha], { rootDir }), 'duplicate-path')
+  })
+
+  it('rejects an empty addition', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
+    await expectSelectionError(() => addFolders(created.dir, [], { rootDir }), 'empty-selection')
+  })
+
+  it('rejects a directory outside the workspace root', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    const plain = await makeSource('plain')
+
+    await expectSelectionError(() => addFolders(plain, [alpha], { rootDir }), 'not-combined')
+  })
+
+  it('rejects a directory inside the root that holds no manifest', async () => {
+    const alpha = await makeSource('alpha')
+    await mkdir(join(rootDir, 'stray'), { recursive: true })
+
+    await expectSelectionError(() => addFolders(join(rootDir, 'stray'), [alpha], { rootDir }), 'not-combined')
+  })
+
+  it('rolls back the links it created when a later link fails', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const delta = await makeSource('delta')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+    const manifestBefore = await readManifest(created.dir)
+    // A real directory occupies the name the second new link would take.
+    await mkdir(join(created.dir, 'delta'))
+
+    await expectSelectionError(() => addFolders(created.dir, [gamma, delta], { rootDir }), 'materialize-failed')
+
+    await expect(lstat(join(created.dir, 'gamma'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readManifest(created.dir)).links).toEqual(manifestBefore.links)
+    expect((await stat(join(created.dir, 'delta'))).isDirectory()).toBe(true)
+  })
+})
+
+describe('removeFolders', () => {
+  it('drops the link and the manifest entry but never the folder', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta, gamma] })
+
+    const { workspace, changed } = await removeFolders(created.dir, ['beta'], { rootDir })
+
+    expect(changed.map(link => link.name)).toEqual(['beta'])
+    expect(workspace.links.map(link => link.name)).toEqual(['alpha', 'gamma'])
+    expect(workspace.title).toBe('alpha and gamma')
+    await expect(lstat(join(created.dir, 'beta'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await stat(beta)).isDirectory()).toBe(true)
+    expect((await readManifest(created.dir)).links.map(link => link.name)).toEqual(['alpha', 'gamma'])
+  })
+
+  it('refuses to leave fewer than two members', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta] })
+
+    await expectSelectionError(() => removeFolders(created.dir, ['beta'], { rootDir }), 'too-few-members')
+    expect((await readManifest(created.dir)).links.length).toBe(2)
+  })
+
+  it('rejects an unknown member', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta, gamma] })
+
+    await expectSelectionError(() => removeFolders(created.dir, ['delta'], { rootDir }), 'member-unknown')
+  })
+
+  it('refuses an entry that is not a link created by this plugin', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({ rootDir, paths: [alpha, beta, gamma] })
+    await rm(join(created.dir, 'beta'))
+    await mkdir(join(created.dir, 'beta'))
+
+    await expectSelectionError(() => removeFolders(created.dir, ['beta'], { rootDir }), 'materialize-failed')
+    expect((await stat(join(created.dir, 'beta'))).isDirectory()).toBe(true)
+  })
+
+  it('keeps a manual title through a removal', async () => {
+    const alpha = await makeSource('alpha')
+    const beta = await makeSource('beta')
+    const gamma = await makeSource('gamma')
+    const created = await materializeWorkspace({
+      rootDir,
+      paths: [alpha, beta, gamma],
+      title: 'Product Docs',
+    })
+
+    const { workspace } = await removeFolders(created.dir, ['beta'], { rootDir })
+
+    expect(workspace.title).toBe('Product Docs')
+    expect(workspace.titleAuto).toBe(false)
   })
 })
 
